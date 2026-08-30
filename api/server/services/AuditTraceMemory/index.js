@@ -218,12 +218,30 @@ async function assertWritable({ layer, nativeRef, token, checkExistingTier }) {
  * `resolveCreateTarget` falls back to the semantic default instead of
  * ever routing a create at a read-only layer.
  *
+ * **Read-only enforcement — the SAME `assertWritable` guard `setMemory`/
+ * `deleteMemory` use, run BEFORE the POST** (2026-08-30 review fix: a
+ * create over an EXISTING read-only/corpus key used to be forwarded
+ * unguarded, since `resolveCreateTarget` only ever resolves to a
+ * nominally-writable layer — it has no way to know the TARGET key
+ * already exists as a corpus-tier item until asked). This is
+ * defense-in-depth / fail-fast UX, not the primary control: the
+ * orchestrator's own `/memory` write-authorization choke (the certified
+ * pre-write check ahead of `_write_layer_private`/`ChromaSemanticService
+ * .upsert` in AuditTrace-AI) is what actually MUST hold under a client
+ * that skips this guard entirely — belt (here) AND suspenders (there). A
+ * server-side 403 that reaches this function anyway (e.g. a TOCTOU race
+ * between the guard's GET and this POST) is NEVER swallowed: it is the
+ * SAME `SovereignMemoryError` `callMemoryProxy` always throws on a
+ * non-2xx status, which `memories.js::respondSovereignError` relays as
+ * the identical status — there is no separate "create" error path that
+ * could reinterpret it into a 500 or a false 409.
+ *
  * Sovereign writes are idempotent/upsert by design (ADR-062) — unlike
- * Mongo's strict-create, re-creating the same key overwrites rather than
- * 409ing; this is a deliberate, documented simplification (the
- * underlying `/memory/{procedural,semantic}` POST endpoints are already
- * upsert-shaped and re-implementing duplicate-detection on top would
- * fight, not follow, that contract).
+ * Mongo's strict-create, re-creating the same (writable, private-tier)
+ * key overwrites rather than 409ing; this is a deliberate, documented
+ * simplification (the underlying `/memory/{procedural,semantic}` POST
+ * endpoints are already upsert-shaped and re-implementing
+ * duplicate-detection on top would fight, not follow, that contract).
  *
  * @param {{userId: string, key: string, value: string, tokenCount?: number, agentId?: string, token: string}} params
  * @returns {Promise<{ok: boolean, memory?: Record<string, unknown>}>}
@@ -231,6 +249,12 @@ async function assertWritable({ layer, nativeRef, token, checkExistingTier }) {
 async function createMemory({ userId, key, value, token }) {
   const target = resolveCreateTarget(key);
   if (target.layer === 'procedural') {
+    await assertWritable({
+      layer: 'procedural',
+      nativeRef: target.filename,
+      token,
+      checkExistingTier: true,
+    });
     await callMemoryProxy({
       method: 'POST',
       path: 'procedural',
@@ -242,6 +266,13 @@ async function createMemory({ userId, key, value, token }) {
       memory: mapLayerItem('procedural', { key: target.filename, title: target.filename }, userId),
     };
   }
+  const semanticNativeRef = `${target.collection}/${target.documentId}`;
+  await assertWritable({
+    layer: 'semantic',
+    nativeRef: semanticNativeRef,
+    token,
+    checkExistingTier: true,
+  });
   await callMemoryProxy({
     method: 'POST',
     path: 'semantic',
@@ -250,11 +281,7 @@ async function createMemory({ userId, key, value, token }) {
   });
   return {
     ok: true,
-    memory: mapLayerItem(
-      'semantic',
-      { key: `${target.collection}/${target.documentId}`, title: target.documentId },
-      userId,
-    ),
+    memory: mapLayerItem('semantic', { key: semanticNativeRef, title: target.documentId }, userId),
   };
 }
 

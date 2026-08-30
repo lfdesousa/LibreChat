@@ -13,11 +13,18 @@ const {
   deleteMemoryById,
 } = require('./index');
 const { parseCompositeKey } = require('./keyMapping');
-const { ReadOnlyLayerError, InvalidCompositeKeyError } = require('./errors');
+const { ReadOnlyLayerError, InvalidCompositeKeyError, SovereignMemoryError } = require('./errors');
 
 describe('AuditTraceMemory adapter (M3-WU-D2-2)', () => {
   afterEach(() => {
-    jest.clearAllMocks();
+    // `mockReset` (not just `clearAllMocks`) — several tests here queue
+    // `mockResolvedValueOnce`/`mockRejectedValueOnce` sequences on the
+    // SAME shared `callMemoryProxy` mock; `clearAllMocks` alone leaves an
+    // unconsumed queued value bleeding into the next test whenever a test
+    // throws before draining its own queue (exactly what an intentional
+    // ADR-049 guard-neuter does), which would misattribute a RED to the
+    // wrong test. A full reset keeps every test's queue independent.
+    callMemoryProxy.mockReset();
   });
 
   describe('getAllUserMemories — list unions the four layers and tags layer + readOnly', () => {
@@ -93,8 +100,10 @@ describe('AuditTraceMemory adapter (M3-WU-D2-2)', () => {
   });
 
   describe('createMemory — CRUD → correct BFF endpoint/method, composite-key round trip', () => {
-    it('a bare key defaults to a semantic POST in the personalization collection', async () => {
-      callMemoryProxy.mockResolvedValue({ id: 'row-1' });
+    it('a bare key (new, own, private) defaults to a semantic POST in the personalization collection — the legit arm', async () => {
+      callMemoryProxy
+        .mockRejectedValueOnce(new SovereignMemoryError('not found', 404)) // tier-check GET — key doesn't exist yet
+        .mockResolvedValueOnce({ id: 'row-1' }); // the POST itself
       const result = await createMemory({
         userId: 'u',
         key: 'timezone',
@@ -102,7 +111,12 @@ describe('AuditTraceMemory adapter (M3-WU-D2-2)', () => {
         token: 'tok',
       });
 
-      expect(callMemoryProxy).toHaveBeenCalledWith({
+      expect(callMemoryProxy).toHaveBeenNthCalledWith(1, {
+        method: 'GET',
+        path: 'semantic/librechat_personalization/timezone',
+        token: 'tok',
+      });
+      expect(callMemoryProxy).toHaveBeenNthCalledWith(2, {
         method: 'POST',
         path: 'semantic',
         token: 'tok',
@@ -117,8 +131,28 @@ describe('AuditTraceMemory adapter (M3-WU-D2-2)', () => {
       });
     });
 
+    it('re-creating an EXISTING, PRIVATE-tier (own) key still works — the legit arm for an overwrite', async () => {
+      callMemoryProxy
+        .mockResolvedValueOnce({ metadata: { tier: 'private' } }) // tier-check GET — own private item
+        .mockResolvedValueOnce({ id: 'row-1' });
+      const result = await createMemory({
+        userId: 'u',
+        key: 'timezone',
+        value: 'PST',
+        token: 'tok',
+      });
+      expect(result.ok).toBe(true);
+      expect(callMemoryProxy).toHaveBeenCalledTimes(2);
+      expect(callMemoryProxy).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ method: 'POST', path: 'semantic' }),
+      );
+    });
+
     it('an explicit procedural: prefix POSTs to /memory/procedural', async () => {
-      callMemoryProxy.mockResolvedValue({ id: 'row-2' });
+      callMemoryProxy
+        .mockRejectedValueOnce(new SovereignMemoryError('not found', 404)) // tier-check GET — new file
+        .mockResolvedValueOnce({ id: 'row-2' });
       const result = await createMemory({
         userId: 'u',
         key: 'procedural:my-skill.md',
@@ -126,7 +160,7 @@ describe('AuditTraceMemory adapter (M3-WU-D2-2)', () => {
         token: 'tok',
       });
 
-      expect(callMemoryProxy).toHaveBeenCalledWith({
+      expect(callMemoryProxy).toHaveBeenNthCalledWith(2, {
         method: 'POST',
         path: 'procedural',
         token: 'tok',
@@ -136,6 +170,58 @@ describe('AuditTraceMemory adapter (M3-WU-D2-2)', () => {
         layer: 'procedural',
         nativeRef: 'my-skill.md',
       });
+    });
+  });
+
+  describe('createMemory — read-only enforcement (2026-08-30 review fix: the gap that was missing)', () => {
+    it('a create targeting an EXISTING corpus-tier semantic key is BLOCKED (403) and the POST NEVER happens — only the tier-check GET', async () => {
+      callMemoryProxy.mockResolvedValueOnce({ metadata: { tier: 'corpus' } });
+
+      await expect(
+        createMemory({
+          userId: 'u',
+          key: 'semantic:decisions_v2/shared-doc',
+          value: 'overwrite attempt',
+          token: 'tok',
+        }),
+      ).rejects.toThrow(ReadOnlyLayerError);
+
+      // Exactly the tier-check GET happened — no POST reached the BFF.
+      expect(callMemoryProxy).toHaveBeenCalledTimes(1);
+      expect(callMemoryProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'GET', path: 'semantic/decisions_v2/shared-doc' }),
+      );
+      expect(callMemoryProxy).not.toHaveBeenCalledWith(expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('a create targeting an EXISTING corpus-tier procedural key is BLOCKED (403) and the POST NEVER happens', async () => {
+      callMemoryProxy.mockResolvedValueOnce({ metadata: { tier: 'corpus' } });
+
+      await expect(
+        createMemory({
+          userId: 'u',
+          key: 'procedural:shared-skill.md',
+          value: 'overwrite attempt',
+          token: 'tok',
+        }),
+      ).rejects.toThrow(ReadOnlyLayerError);
+
+      expect(callMemoryProxy).toHaveBeenCalledTimes(1);
+      expect(callMemoryProxy).not.toHaveBeenCalledWith(expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('a server-side 403 on the POST itself (the TOCTOU/new-choke case — the local check said private but the write-authorization choke still rejects) propagates unchanged, never swallowed into a 500 or a false success', async () => {
+      callMemoryProxy
+        .mockResolvedValueOnce({ metadata: { tier: 'private' } }) // tier-check GET passed
+        .mockRejectedValueOnce(
+          new SovereignMemoryError('forbidden by write-authorization choke', 403),
+        );
+
+      await expect(
+        createMemory({ userId: 'u', key: 'timezone', value: 'UTC', token: 'tok' }),
+      ).rejects.toMatchObject({ status: 403 });
+
+      expect(callMemoryProxy).toHaveBeenCalledTimes(2);
     });
   });
 
