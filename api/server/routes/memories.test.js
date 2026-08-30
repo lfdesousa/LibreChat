@@ -9,6 +9,27 @@ const mockOpaqueUpdateById = jest.fn((_req, res) => res.status(202).json({ deleg
 const mockOpaqueDeleteById = jest.fn((_req, res) => res.status(202).json({ delegated: 'delete' }));
 let mockFilters;
 
+// M3-WU-D2-2: `memories.js` now also imports `logger` from
+// `@librechat/data-schemas` (for the sovereign-backend error path) and the
+// sovereign adapter itself (mocked below, `AUDITTRACE_MEMORY_BACKEND`
+// unset/`mongo` in every test in THIS file — the point of these mocks is
+// only to keep the module graph loadable, not to exercise the sovereign
+// path, which has its own dedicated test files under
+// `server/services/AuditTraceMemory/`).
+jest.mock('@librechat/data-schemas', () => ({
+  logger: { warn: jest.fn(), error: jest.fn(), debug: jest.fn(), info: jest.fn() },
+}));
+
+jest.mock('~/server/services/AuditTraceMemory', () => ({
+  getAllUserMemories: jest.fn(),
+  getUserMemories: jest.fn(),
+  createMemory: jest.fn(),
+  setMemory: jest.fn(),
+  deleteMemory: jest.fn(),
+  setMemoryById: jest.fn(),
+  deleteMemoryById: jest.fn(),
+}));
+
 jest.mock('@librechat/api', () => ({
   Tokenizer: { getTokenCount: jest.fn(() => 1) },
   generateCheckAccess: jest.fn(() => (_req, _res, next) => next()),
