@@ -1,4 +1,5 @@
 import type { TUserMemory } from 'librechat-data-provider';
+import { getMemoryLayerLabelKey } from '~/utils/memory';
 import MemoryCardActions from './MemoryCardActions';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
@@ -19,6 +20,12 @@ const formatDate = (dateString: string): string => {
 export default function MemoryCard({ memory, hasUpdateAccess }: MemoryCardProps) {
   const localize = useLocalize();
   const displayKey = memory.key || localize('com_ui_memory');
+  const layerLabelKey = memory.layer != null ? getMemoryLayerLabelKey(memory.layer) : null;
+  const isReadOnly = memory.readOnly === true;
+  /** Cosmetic only — the server/adapter is the real guard (ADR-026/M3-WU-D2-2);
+   *  this just keeps the panel from offering an edit/delete affordance the
+   *  backend would reject anyway. */
+  const canManage = hasUpdateAccess && !isReadOnly;
 
   return (
     <div
@@ -28,9 +35,18 @@ export default function MemoryCard({ memory, hasUpdateAccess }: MemoryCardProps)
         'hover:bg-surface-secondary',
       )}
     >
-      {/* Row 1: Key + Agent badge + Token count + Actions */}
+      {/* Row 1: Key + Layer badge + Agent badge + Token count + Actions */}
       <div className="flex items-center gap-2">
         <span className="truncate text-sm font-semibold text-text-primary">{displayKey}</span>
+        {layerLabelKey != null && (
+          <span
+            className="shrink-0 truncate rounded-full border border-border-light px-2 py-0.5 text-xs text-text-secondary"
+            title={isReadOnly ? localize('com_ui_memory_read_only') : undefined}
+          >
+            {localize(layerLabelKey)}
+            {isReadOnly && ` · ${localize('com_ui_memory_read_only')}`}
+          </span>
+        )}
         {memory.agentId != null && (
           <span
             className="shrink-0 truncate rounded-full border border-border-light px-2 py-0.5 text-xs text-text-secondary"
@@ -45,7 +61,7 @@ export default function MemoryCard({ memory, hasUpdateAccess }: MemoryCardProps)
             {localize(memory.tokenCount === 1 ? 'com_ui_token' : 'com_ui_tokens')}
           </span>
         )}
-        {hasUpdateAccess && (
+        {canManage && (
           <div className="ml-auto shrink-0">
             <MemoryCardActions memory={memory} />
           </div>

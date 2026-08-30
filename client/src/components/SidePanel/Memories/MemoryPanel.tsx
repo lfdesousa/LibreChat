@@ -13,6 +13,12 @@ import {
 } from '@librechat/client';
 import type { TUserMemory } from 'librechat-data-provider';
 import {
+  MEMORY_LAYER_ALL,
+  MEMORY_LAYER_FILTER_VALUES,
+  getMemoryLayerLabelKey,
+  hasSovereignLayerData,
+} from '~/utils/memory';
+import {
   useUpdateMemoryPreferencesMutation,
   useMemoriesQuery,
   useGetUserQuery,
@@ -38,6 +44,7 @@ export default function MemoryPanel() {
   const { showToast } = useToastContext();
   const [searchQuery, setSearchQuery] = useState('');
   const [partitionFilter, setPartitionFilter] = useState(PARTITION_ALL);
+  const [layerFilter, setLayerFilter] = useState<string>(MEMORY_LAYER_ALL);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [referenceSavedMemories, setReferenceSavedMemories] = useState(true);
 
@@ -119,6 +126,37 @@ export default function MemoryPanel() {
       : PARTITION_ALL;
   }, [partitionOptions, partitionFilter]);
 
+  /** True only when the sovereign-memory adapter (M3-WU-D2-2) has projected a
+   *  `layer` on at least one entry — the default `mongo` backend never does,
+   *  so the filter chrome below stays entirely absent and the panel renders
+   *  byte-equivalent to upstream (M3-WU-D2-3 Part A, requirement 6). */
+  const hasLayerData = useMemo(() => hasSovereignLayerData(memories), [memories]);
+
+  const layerOptions = useMemo(() => {
+    if (!hasLayerData) {
+      return null;
+    }
+    return [
+      { value: MEMORY_LAYER_ALL, label: localize('com_ui_memories_layer_all') },
+      ...MEMORY_LAYER_FILTER_VALUES.map((layer) => {
+        const labelKey = getMemoryLayerLabelKey(layer);
+        return { value: layer, label: labelKey ? localize(labelKey) : layer };
+      }),
+    ];
+  }, [hasLayerData, localize]);
+
+  /** Falls back to "all" once there is no layer data to filter by (e.g. the
+   *  mongo backend, or a stale selection from a prior sovereign session). */
+  const activeLayer = useMemo(() => {
+    if (!hasLayerData) {
+      return MEMORY_LAYER_ALL;
+    }
+    return layerFilter === MEMORY_LAYER_ALL ||
+      (MEMORY_LAYER_FILTER_VALUES as readonly string[]).includes(layerFilter)
+      ? layerFilter
+      : MEMORY_LAYER_ALL;
+  }, [hasLayerData, layerFilter]);
+
   const filteredMemories = useMemo(() => {
     const partitionMemories =
       activePartition === PARTITION_ALL
@@ -128,10 +166,14 @@ export default function MemoryPanel() {
               ? memory.agentId == null
               : memory.agentId === activePartition,
           );
-    return matchSorter(partitionMemories, searchQuery, {
+    const layerMemories =
+      activeLayer === MEMORY_LAYER_ALL
+        ? partitionMemories
+        : partitionMemories.filter((memory) => memory.layer === activeLayer);
+    return matchSorter(layerMemories, searchQuery, {
       keys: ['key', 'value'],
     });
-  }, [memories, searchQuery, activePartition]);
+  }, [memories, searchQuery, activePartition, activeLayer]);
 
   if (!hasReadAccess) {
     return (
@@ -196,6 +238,19 @@ export default function MemoryPanel() {
             triggerClassName="w-full"
             ariaLabel={localize('com_ui_memories_partition_filter')}
             testId="memory-partition-filter"
+          />
+        )}
+
+        {/* Layer filter (sovereign backend only — absent under the default mongo backend) */}
+        {layerOptions && (
+          <Dropdown
+            value={activeLayer}
+            onChange={setLayerFilter}
+            options={layerOptions}
+            className="w-full"
+            triggerClassName="w-full"
+            ariaLabel={localize('com_ui_memories_layer_filter')}
+            testId="memory-layer-filter"
           />
         )}
 

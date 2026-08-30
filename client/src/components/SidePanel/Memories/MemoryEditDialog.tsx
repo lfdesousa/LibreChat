@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { AlertTriangle } from 'lucide-react';
 import { PermissionTypes, Permissions } from 'librechat-data-provider';
 import {
   OGDialog,
@@ -53,6 +54,13 @@ export default function MemoryEditDialog({
     permissionType: PermissionTypes.MEMORIES,
     permission: Permissions.UPDATE,
   });
+  /** A per-entry mirror of the adapter's own read-only guard (M3-WU-D2-2): the
+   *  permission grants UPDATE in general, but this specific entry (e.g. the
+   *  `conversational` layer, or a corpus-tier item) is not writable. Reachable
+   *  only defensively — `MemoryCardActions` already withholds the trigger for
+   *  a read-only entry — so the dialog still falls back to view-only rather
+   *  than let a write reach the mutation and bounce off a 403. */
+  const canEdit = hasUpdateAccess && memory?.readOnly !== true;
 
   const { mutate: updateMemory, isLoading } = useUpdateMemoryMutation({
     onSuccess: () => {
@@ -60,16 +68,19 @@ export default function MemoryEditDialog({
         message: localize('com_ui_saved'),
         status: 'success',
       });
+      setApiError(null);
       onOpenChange(false);
       setTimeout(() => {
         triggerRef?.current?.focus();
       }, 0);
     },
     onError: (error: Error) => {
-      showToast({
-        message: getMemoryApiErrorMessage(error, localize('com_ui_error')),
-        status: 'error',
-      });
+      const message = getMemoryApiErrorMessage(error, localize('com_ui_error'));
+      /** Inline, not just a toast that can be missed — a write rejected by the
+       *  adapter's read-only-layer guard (403, e.g. a TOCTOU race against a
+       *  layer change) must never read as a silent success. */
+      setApiError(message);
+      showToast({ message, status: 'error' });
     },
   });
 
@@ -78,6 +89,7 @@ export default function MemoryEditDialog({
   const [originalKey, setOriginalKey] = useState('');
   const [touched, setTouched] = useState({ key: false, value: false });
   const [prevMemory, setPrevMemory] = useState<TUserMemory | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
   const memoryAddress = memory ? getMemoryAddress(memory) : null;
   const requiresKey =
     memoryAddress == null || !('id' in memoryAddress) || memory?.key.trim() !== '';
@@ -89,6 +101,7 @@ export default function MemoryEditDialog({
       setValue(memory.value);
       setOriginalKey(memory.key);
       setTouched({ key: false, value: false });
+      setApiError(null);
     }
   }
 
@@ -104,11 +117,11 @@ export default function MemoryEditDialog({
   const valueError = getMemoryValueError(value);
   const hasErrors = keyError != null || valueError != null;
   /** Stay quiet on a pristine empty field; validate live once there is something to judge. */
-  const showKeyError = hasUpdateAccess && (touched.key || key !== '');
-  const showValueError = hasUpdateAccess && (touched.value || value !== '');
+  const showKeyError = canEdit && (touched.key || key !== '');
+  const showValueError = canEdit && (touched.value || value !== '');
 
   const handleSave = () => {
-    if (!hasUpdateAccess || !memory || !memoryAddress) {
+    if (!canEdit || !memory || !memoryAddress) {
       return;
     }
 
@@ -123,6 +136,7 @@ export default function MemoryEditDialog({
       return;
     }
 
+    setApiError(null);
     updateMemory({
       ...updateAddress,
       value: value.trim(),
@@ -131,7 +145,7 @@ export default function MemoryEditDialog({
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && e.ctrlKey && hasUpdateAccess) {
+    if (e.key === 'Enter' && e.ctrlKey && canEdit) {
       handleSave();
     }
   };
@@ -150,11 +164,20 @@ export default function MemoryEditDialog({
     <OGDialog open={open} onOpenChange={onOpenChange} triggerRef={triggerRef}>
       {children}
       <OGDialogTemplate
-        title={hasUpdateAccess ? localize('com_ui_edit_memory') : localize('com_ui_view_memory')}
+        title={canEdit ? localize('com_ui_edit_memory') : localize('com_ui_view_memory')}
         showCloseButton={false}
         className="w-11/12 md:max-w-lg"
         main={
           <div className="space-y-4">
+            {apiError != null && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-md border border-status-error-border bg-status-error-subtle p-3 text-sm text-text-destructive"
+              >
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <span>{apiError}</span>
+              </div>
+            )}
             {/* Memory metadata */}
             {memory && (
               <div className="flex items-center justify-between rounded-lg border border-border-light bg-surface-secondary px-3 py-2">
@@ -195,12 +218,12 @@ export default function MemoryEditDialog({
               <Input
                 id="memory-key"
                 value={key}
-                onChange={(e) => hasUpdateAccess && setKey(e.target.value)}
+                onChange={(e) => canEdit && setKey(e.target.value)}
                 onBlur={() => setTouched((prev) => ({ ...prev, key: true }))}
                 onKeyDown={handleKeyPress}
                 placeholder={localize('com_ui_enter_key')}
                 className="w-full"
-                disabled={!hasUpdateAccess}
+                disabled={!canEdit}
                 aria-invalid={showKeyError && keyError != null}
                 aria-describedby="memory-key-message"
               />
@@ -220,13 +243,13 @@ export default function MemoryEditDialog({
               <Textarea
                 id="memory-value"
                 value={value}
-                onChange={(e) => hasUpdateAccess && setValue(e.target.value)}
+                onChange={(e) => canEdit && setValue(e.target.value)}
                 onBlur={() => setTouched((prev) => ({ ...prev, value: true }))}
                 onKeyDown={handleKeyPress}
                 placeholder={localize('com_ui_enter_value')}
                 className="min-h-[100px] w-full resize-none rounded-lg border border-border-light bg-transparent px-3 py-2 text-sm text-text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border-heavy disabled:cursor-not-allowed disabled:opacity-50"
                 rows={4}
-                disabled={!hasUpdateAccess}
+                disabled={!canEdit}
                 aria-invalid={showValueError && valueError != null}
                 aria-describedby="memory-value-message"
               />
@@ -238,7 +261,7 @@ export default function MemoryEditDialog({
           </div>
         }
         buttons={
-          hasUpdateAccess ? (
+          canEdit ? (
             <Button
               type="button"
               variant="submit"

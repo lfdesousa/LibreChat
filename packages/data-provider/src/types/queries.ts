@@ -177,6 +177,17 @@ export type TUserMemory = {
   agentName?: string;
   /** Current policy removed one or more memory content fields from this response. */
   contentFilterBlocked?: boolean;
+  /** Sovereign-memory layer this entry lives in (episodic/semantic/procedural/
+   *  conversational/corpus). Populated only when the AuditTrace sovereign-memory
+   *  adapter is active (`AUDITTRACE_MEMORY_BACKEND=sovereign`, M3-WU-D2-2);
+   *  absent under the default `mongo` backend. */
+  layer?: string;
+  /** True when the server/adapter will refuse a write to this entry (e.g. the
+   *  `conversational` layer, or a corpus-tier item) — the panel must not offer
+   *  edit/delete for it. Populated only under the sovereign backend, alongside
+   *  `layer`; a cosmetic mirror of the adapter's own fail-closed guard, which
+   *  remains the real enforcement point. */
+  readOnly?: boolean;
 };
 
 export type MemoriesResponse = {
