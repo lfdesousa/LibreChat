@@ -63,6 +63,9 @@ const { loadAuthValues } = require('~/server/services/Tools/credentials');
 const { getMCPServerTools, checkCapability } = require('~/server/services/Config');
 const { getMCPServersRegistry } = require('~/config');
 const { getRoleByName, setMemory, deleteMemory, getFormattedMemories } = require('~/models');
+// M3-WU-D2-3 Part B — closes the Mongo split-brain for the agent's inline
+// set_memory/delete_memory tools (see `agentMethods.js`'s module docstring).
+const { resolveMemoryWriteMethods } = require('~/server/services/AuditTraceMemory/agentMethods');
 
 /**
  * Validates the availability and authentication of tools for a user based on environment variables or user-specific plugin authentication values.
@@ -452,7 +455,15 @@ const loadTools = async ({
           req: options.req,
           agent,
           userId: user,
-          memoryMethods: { setMemory, deleteMemory, getFormattedMemories },
+          // M3-WU-D2-3 Part B: under AUDITTRACE_MEMORY_BACKEND=sovereign, the
+          // agent's inline set_memory/delete_memory tools write through the
+          // SAME sovereign adapter D2-2 built for the panel — not Mongo.
+          // `resolveMemoryWriteMethods` returns `mongoMethods` UNCHANGED
+          // (same reference) under the default `mongo` flag.
+          memoryMethods: resolveMemoryWriteMethods({
+            req: options.req,
+            mongoMethods: { setMemory, deleteMemory, getFormattedMemories },
+          }),
           getRoleByName,
         });
       continue;
