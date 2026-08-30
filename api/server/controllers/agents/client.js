@@ -168,7 +168,12 @@ const { getMCPManager } = require('~/config');
 const db = require('~/models');
 // M3-WU-D2-3 Part B — closes the Mongo split-brain for the memory-extraction
 // agent's own writes (see `agentMethods.js`'s module docstring).
-const { resolveMemoryWriteMethods } = require('~/server/services/AuditTraceMemory/agentMethods');
+// M3-WU-D2-3c — `resolveMemoryMethods` is the SAME seam, aliased for the
+// pure-read memory-CONTEXT call sites below (closes the READ split-brain).
+const {
+  resolveMemoryWriteMethods,
+  resolveMemoryMethods,
+} = require('~/server/services/AuditTraceMemory/agentMethods');
 
 const loadAgent = (params) => loadAgentFn(params, { getAgent: db.getAgent, getMCPServerTools });
 
@@ -2280,6 +2285,19 @@ class AgentClient extends BaseClient {
     const loadedMemoryAgentId = getMemoryAgentId(this.options.agent);
     const buildMemoryContext = (text) =>
       text ? `${memoryInstructions}\n\n# Existing memory about the user:\n${text}` : undefined;
+    // M3-WU-D2-3c — mongo (unchanged) or sovereign, by the flag; resolved
+    // once for both partition helpers below so a sovereign write earlier in
+    // this SAME turn (Part B) is visible to this turn's own context read.
+    const {
+      getFormattedMemories: resolvedGetFormattedMemories,
+      getUserMemories: resolvedGetUserMemories,
+    } = resolveMemoryMethods({
+      req: this.options.req,
+      mongoMethods: {
+        getFormattedMemories: db.getFormattedMemories,
+        getUserMemories: db.getUserMemories,
+      },
+    });
     /** Resolves formatted memories for an agent's own partition. A defined
      *  `memories` means the run-level gates (permission, opt-out, config)
      *  passed; agents on other partitions fetch through the request-scoped
@@ -2297,7 +2315,7 @@ class AgentClient extends BaseClient {
           req: this.options.req,
           userId: this.options.req.user.id + '',
           agentId: agentPartition,
-          getFormattedMemories: db.getFormattedMemories,
+          getFormattedMemories: resolvedGetFormattedMemories,
         });
       } catch (error) {
         logger.error('[AgentClient] Error loading partition memories', getSafeErrorMetadata(error));
@@ -2309,7 +2327,7 @@ class AgentClient extends BaseClient {
       if (!hasActivePiiPatterns(this.options.req.config?.filters?.memories?.pii)) {
         return undefined;
       }
-      if (typeof db.getUserMemories !== 'function') {
+      if (typeof resolvedGetUserMemories !== 'function') {
         throw new Error('Canonical memory inspection is unavailable');
       }
       const agentId = getMemoryAgentId(agent);
@@ -2317,7 +2335,7 @@ class AgentClient extends BaseClient {
       if (!canonicalMemoryCache.has(cacheKey)) {
         canonicalMemoryCache.set(
           cacheKey,
-          db.getUserMemories({
+          resolvedGetUserMemories({
             userId: this.options.req.user.id + '',
             agentId,
           }),
@@ -2606,11 +2624,15 @@ class AgentClient extends BaseClient {
 
     if (!isMemoryAgentEnabled(memoryConfig)) {
       try {
+        // M3-WU-D2-3c — mongo (unchanged) or sovereign, by the flag.
         const { withKeys, withoutKeys } = await getRequestMemories({
           req: this.options.req,
           userId,
           agentId: memoryAgentId,
-          getFormattedMemories: db.getFormattedMemories,
+          getFormattedMemories: resolveMemoryMethods({
+            req: this.options.req,
+            mongoMethods: { getFormattedMemories: db.getFormattedMemories },
+          }).getFormattedMemories,
         });
         return { withKeys, withoutKeys };
       } catch (error) {
@@ -2745,11 +2767,17 @@ class AgentClient extends BaseClient {
     this.processMemory = processMemory;
     let withKeys = withoutKeys;
     try {
+      // M3-WU-D2-3c — mongo (unchanged) or sovereign, by the flag; reads back
+      // through the SAME adapter the write above (Part B) just landed in, so
+      // this turn's own "remember this" is visible in its own keyed reload.
       ({ withKeys } = await getRequestMemories({
         req: this.options.req,
         userId,
         agentId: memoryAgentId,
-        getFormattedMemories: db.getFormattedMemories,
+        getFormattedMemories: resolveMemoryMethods({
+          req: this.options.req,
+          mongoMethods: { getFormattedMemories: db.getFormattedMemories },
+        }).getFormattedMemories,
       }));
     } catch (error) {
       logger.error(
@@ -2791,11 +2819,15 @@ class AgentClient extends BaseClient {
         if (scopes.has(scope)) {
           return;
         }
+        // M3-WU-D2-3c — mongo (unchanged) or sovereign, by the flag.
         const snapshot = await getRequestMemories({
           req: this.options.req,
           userId,
           agentId,
-          getFormattedMemories: db.getFormattedMemories,
+          getFormattedMemories: resolveMemoryMethods({
+            req: this.options.req,
+            mongoMethods: { getFormattedMemories: db.getFormattedMemories },
+          }).getFormattedMemories,
         });
         scopes.set(scope, snapshot);
       }),

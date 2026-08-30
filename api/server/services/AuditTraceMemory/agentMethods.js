@@ -162,9 +162,34 @@ function resolveMemoryWriteMethods({ req, mongoMethods }) {
   return createSovereignAgentMemoryMethods({ token });
 }
 
+/**
+ * Alias of {@link resolveMemoryWriteMethods} for the pure-read chat-turn
+ * memory-CONTEXT call sites (M3-WU-D2-3c — closes the READ split-brain the
+ * D2-3 Part-B reviewer disclosed: `openai.js`/`responses.js`'s
+ * `buildInlineMemoryContext`, `resume.js`'s
+ * `resumeContentProtectionDependencies.getUserMemories`, and `client.js`'s
+ * partition/canonical/keyed-reload memory reads, all of which called
+ * `db.getFormattedMemories`/`db.getUserMemories` directly and so never saw a
+ * sovereign write from the SAME turn).
+ *
+ * Deliberately the SAME function reference, not a re-implementation:
+ * `resolveMemoryWriteMethods` already resolves ANY `MemoryMethods`-shaped
+ * object — mongo-vs-sovereign, by the flag, token-bound from `req` — and its
+ * own JSDoc already scopes it to "an agent-side write/read call" (see
+ * above); a pure-read call site needs no new bridge logic, only a name that
+ * does not read as write-only at the call site. Renaming
+ * `resolveMemoryWriteMethods` itself would touch Part B's own (frozen,
+ * already-reviewed) call site and its tests for zero behavioural gain, so
+ * this alias is purely additive — ONE seam, two names.
+ *
+ * @type {typeof resolveMemoryWriteMethods}
+ */
+const resolveMemoryMethods = resolveMemoryWriteMethods;
+
 module.exports = {
   createSovereignAgentMemoryMethods,
   resolveMemoryWriteMethods,
+  resolveMemoryMethods,
   resolveWriteCompositeKey,
   formatMemories,
 };

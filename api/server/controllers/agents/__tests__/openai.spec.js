@@ -467,6 +467,14 @@ describe('OpenAIChatCompletionController', () => {
     expect(mockBuildInlineMemoryContext).toHaveBeenCalledWith(
       expect.objectContaining({ agent: memberConfig, memoryAvailable: true }),
     );
+    // M3-WU-D2-3c — default `mongo` flag: the memory-CONTEXT read function
+    // passed to buildInlineMemoryContext is `db.getFormattedMemories` BY
+    // REFERENCE (routed through resolveMemoryMethods, which returns
+    // mongoMethods unchanged when AUDITTRACE_MEMORY_BACKEND is unset) — the
+    // frozen default path.
+    expect(mockBuildInlineMemoryContext.mock.calls[0][0].getFormattedMemories).toBe(
+      require('~/models').getFormattedMemories,
+    );
     const { createRun } = require('@librechat/api');
     expect(createRun).toHaveBeenCalledWith(
       expect.objectContaining({ initialSessions: mockInitialSessions }),

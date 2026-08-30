@@ -89,6 +89,11 @@ const mockGetFiles = jest.fn();
 const mockGetAgent = jest.fn();
 const mockGetActions = jest.fn();
 const mockGetUserMemories = jest.fn();
+// M3-WU-D2-3c — default implementation matches the REAL
+// `resolveMemoryMethods` under the unset (mongo) flag: mongoMethods
+// returned UNCHANGED (same reference). Every EXISTING test below relies on
+// that passthrough and is unaffected; overridden per-test where noted.
+const mockResolveMemoryMethods = jest.fn(({ mongoMethods }) => mongoMethods);
 const mockGetRoleByName = jest.fn();
 const mockCheckAccess = jest.fn();
 const mockCheckPermission = jest.fn();
@@ -174,6 +179,15 @@ jest.mock('~/models', () => ({
 
 jest.mock('~/server/services/Endpoints/agents/eventChildLease', () => ({
   acquireEventChildGenerationLease: (...args) => mockAcquireEventChildGenerationLease(...args),
+}));
+
+// M3-WU-D2-3c/Part B — the mongo-vs-sovereign memory routing seam. Default
+// implementation passes `mongoMethods` through UNCHANGED (matching the real
+// module's behaviour when `AUDITTRACE_MEMORY_BACKEND` is unset), so every
+// pre-existing test above is unaffected; overridden per-test below to prove
+// the sovereign-routing wiring at the real `preflightResumeContent` call site.
+jest.mock('~/server/services/AuditTraceMemory/agentMethods', () => ({
+  resolveMemoryMethods: (...args) => mockResolveMemoryMethods(...args),
 }));
 
 jest.mock('~/server/services/ActionService', () => ({
@@ -309,6 +323,11 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // M3-WU-D2-3c — `clearAllMocks` does not reset a custom
+    // `mockImplementation`; restore the default mongo-passthrough so a
+    // sovereign-routing test overriding this earlier in the file cannot
+    // leak into a later, unrelated test.
+    mockResolveMemoryMethods.mockImplementation(({ mongoMethods }) => mongoMethods);
 
     capturedInit = null;
     requestConfigOverrides = {};
@@ -1571,6 +1590,56 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       });
       expect(mockGenerationJobManager.approvals.resolve).not.toHaveBeenCalled();
       expect(mockInitializeClient).not.toHaveBeenCalled();
+    });
+
+    /**
+     * M3-WU-D2-3c — closes the memory-CONTEXT READ split-brain for the
+     * resume path: `preflightResumeContent`'s `getUserMemories` dependency
+     * must resolve through `resolveMemoryMethods` (the SAME seam Part B
+     * built for writes), never call `db.getUserMemories` (Mongo) directly,
+     * when `AUDITTRACE_MEMORY_BACKEND=sovereign`. Non-vacuous: reverting
+     * `resume.js`'s override back to the bare static
+     * `resumeContentProtectionDependencies` makes this fail RED (the
+     * sovereign spy is never reached); verified by hand during the build,
+     * restored GREEN.
+     */
+    it('under sovereign, the current model-bound memory check resolves through resolveMemoryMethods, never db.getUserMemories', async () => {
+      requestConfigOverrides = {
+        memory: { disabled: false },
+        filters: {
+          memories: {
+            pii: {
+              fields: ['value'],
+              starterPatterns: ['sk_prefix'],
+            },
+          },
+        },
+      };
+      const sovereignGetUserMemories = jest
+        .fn()
+        .mockResolvedValue([{ key: 'credential', value: 'sk-current-memory-secret' }]);
+      const resolveCalls = [];
+      mockResolveMemoryMethods.mockImplementation(({ req, mongoMethods }) => {
+        resolveCalls.push({
+          req,
+          hasGetUserMemories: typeof mongoMethods?.getUserMemories === 'function',
+        });
+        return { getUserMemories: sovereignGetUserMemories };
+      });
+      mockGetUserMemories.mockResolvedValue([]); // would betray a split-brain if ever called
+      mockGenerationJobManager.getJob.mockResolvedValue(makeToolApprovalJob());
+
+      const res = await post(approveBody());
+
+      expect(res.status).toBe(400);
+      expect(resolveCalls.length).toBeGreaterThan(0);
+      expect(resolveCalls.every((call) => call.hasGetUserMemories)).toBe(true);
+      expect(sovereignGetUserMemories).toHaveBeenCalledWith({
+        userId: USER_ID,
+        agentId: undefined,
+      });
+      expect(mockGetUserMemories).not.toHaveBeenCalled();
+      expect(mockGenerationJobManager.approvals.resolve).not.toHaveBeenCalled();
     });
 
     it('claims and ACKs a safe current agent graph, action, and memory snapshot', async () => {
