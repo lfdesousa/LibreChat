@@ -166,6 +166,9 @@ const { getMCPServerTools } = require('~/server/services/Config');
 const BaseClient = require('~/app/clients/BaseClient');
 const { getMCPManager } = require('~/config');
 const db = require('~/models');
+// M3-WU-D2-3 Part B — closes the Mongo split-brain for the memory-extraction
+// agent's own writes (see `agentMethods.js`'s module docstring).
+const { resolveMemoryWriteMethods } = require('~/server/services/AuditTraceMemory/agentMethods');
 
 const loadAgent = (params) => loadAgentFn(params, { getAgent: db.getAgent, getMCPServerTools });
 
@@ -2721,12 +2724,20 @@ class AgentClient extends BaseClient {
       streamId,
       jobCreatedAt: this.jobCreatedAt,
       conversationId,
-      memoryMethods: {
-        setMemory: db.setMemory,
-        deleteMemory: db.deleteMemory,
-        getUserMemories: db.getUserMemories,
-        getFormattedMemories: db.getFormattedMemories,
-      },
+      // M3-WU-D2-3 Part B: under AUDITTRACE_MEMORY_BACKEND=sovereign, the
+      // memory-extraction agent's writes (its own set_memory/delete_memory
+      // tool calls) land in the SAME sovereign adapter D2-2 built for the
+      // panel — not Mongo. `resolveMemoryWriteMethods` returns this object
+      // UNCHANGED (same reference) under the default `mongo` flag.
+      memoryMethods: resolveMemoryWriteMethods({
+        req: this.options.req,
+        mongoMethods: {
+          setMemory: db.setMemory,
+          deleteMemory: db.deleteMemory,
+          getUserMemories: db.getUserMemories,
+          getFormattedMemories: db.getFormattedMemories,
+        },
+      }),
       res: this.options.res,
       user: createSafeUser(this.options.req.user),
     });
