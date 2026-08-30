@@ -17,6 +17,7 @@ const { callMemoryProxy } = require('./client');
 const {
   createSovereignAgentMemoryMethods,
   resolveMemoryWriteMethods,
+  resolveMemoryMethods,
   resolveWriteCompositeKey,
   formatMemories,
 } = require('./agentMethods');
@@ -294,5 +295,136 @@ describe('resolveMemoryWriteMethods — the Mongo-vs-sovereign routing seam', ()
     // back to mongoMethods just because the token is absent.
     expect(resolved).not.toBe(mongoMethods);
     expect(resolved.setMemory).not.toBe(mongoMethods.setMemory);
+  });
+});
+
+/**
+ * M3-WU-D2-3c — closes the READ split-brain: the chat-turn memory-CONTEXT
+ * reads at `openai.js`/`responses.js`/`resume.js`/`client.js` (8 sites) all
+ * call `resolveMemoryMethods({ req, mongoMethods })` with a PARTIAL
+ * `mongoMethods` object holding ONLY the read method(s) they need (never
+ * `setMemory`/`deleteMemory`) — unlike Part B's write-seam call sites above.
+ * `resolveMemoryMethods` is the SAME function as `resolveMemoryWriteMethods`
+ * (see its own JSDoc); these tests exercise it through that exact
+ * read-only-partial shape to prove the alias behaves identically for a
+ * pure-read caller, and that the formatted/array shapes it returns match
+ * what the agent runtime (`buildInlineMemoryContext`/`getRequestMemories`/
+ * `preflightResumeContent`) expects from the Mongo model functions it
+ * replaces.
+ */
+describe('resolveMemoryMethods — the READ-routing alias (M3-WU-D2-3c)', () => {
+  it('is the exact same function as resolveMemoryWriteMethods — ONE seam, not a reimplementation', () => {
+    expect(resolveMemoryMethods).toBe(resolveMemoryWriteMethods);
+  });
+
+  it('returns a read-only mongoMethods object UNCHANGED (same reference) under the default mongo flag', () => {
+    delete process.env.AUDITTRACE_MEMORY_BACKEND;
+    const mongoMethods = { getFormattedMemories: jest.fn() };
+
+    const resolved = resolveMemoryMethods({ req: {}, mongoMethods });
+
+    expect(resolved).toBe(mongoMethods);
+    expect(resolved.getFormattedMemories).toBe(mongoMethods.getFormattedMemories);
+  });
+
+  /**
+   * Non-vacuous guard for the READ side specifically, per the ratified
+   * spec's acceptance criterion 1: "under sovereign, a chat-turn
+   * memory-context read is served from the sovereign adapter ... NOT
+   * db.getFormattedMemories/getUserMemories". Neutering the call sites'
+   * wiring (reverting `getFormattedMemories: resolvedGetFormattedMemories`
+   * back to `getFormattedMemories: db.getFormattedMemories`) was verified by
+   * hand to turn `memoryContextReads.sovereign.test.js` RED; restored GREEN.
+   * This test proves the underlying resolution the wiring depends on.
+   */
+  it('under sovereign, a getFormattedMemories-only read site resolves to the adapter and NEVER calls the injected Mongo function', async () => {
+    process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+    const mongoGetFormattedMemories = jest.fn().mockResolvedValue({
+      withKeys: 'MONGO-SHOULD-NEVER-APPEAR',
+      withoutKeys: 'MONGO-SHOULD-NEVER-APPEAR',
+      totalTokens: 0,
+      tokenCountsByKey: new Map(),
+    });
+    const req = { session: { openidTokens: { accessToken: 'user-bearer-token' } } };
+
+    const resolved = resolveMemoryMethods({
+      req,
+      mongoMethods: { getFormattedMemories: mongoGetFormattedMemories },
+    });
+    expect(resolved.getFormattedMemories).not.toBe(mongoGetFormattedMemories);
+
+    callMemoryProxy.mockImplementation(async ({ path }) => {
+      if (path === 'semantic') {
+        return {
+          items: [
+            {
+              key: 'librechat_personalization/favorite_language',
+              title: 'favorite_language',
+              modified_at_ms: Date.parse('2026-08-30T00:00:00.000Z'),
+              tier: 'private',
+            },
+          ],
+        };
+      }
+      return { items: [] };
+    });
+
+    // Same call signature the real read sites use (`{userId, agentId}`).
+    const result = await resolved.getFormattedMemories({ userId: 'u1', agentId: undefined });
+
+    expect(mongoGetFormattedMemories).not.toHaveBeenCalled();
+    expect(result.withKeys).not.toContain('MONGO-SHOULD-NEVER-APPEAR');
+    // Parity with the Mongo model's shape (`buildInlineMemoryContext`/
+    // `getRequestMemories` destructure `.withKeys`/`.withoutKeys`).
+    expect(result).toEqual(
+      expect.objectContaining({
+        withKeys: expect.stringContaining('librechat_personalization/favorite_language'),
+        withoutKeys: expect.any(String),
+        totalTokens: expect.any(Number),
+      }),
+    );
+  });
+
+  it('under sovereign, a getUserMemories-only read site (resume.js preflight shape) resolves to the adapter and NEVER calls the injected Mongo function', async () => {
+    process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+    const mongoGetUserMemories = jest
+      .fn()
+      .mockResolvedValue([{ key: 'mongo', value: 'should-never-appear' }]);
+    const req = { session: { openidTokens: { accessToken: 'user-bearer-token' } } };
+
+    const resolved = resolveMemoryMethods({
+      req,
+      mongoMethods: { getUserMemories: mongoGetUserMemories },
+    });
+    expect(resolved.getUserMemories).not.toBe(mongoGetUserMemories);
+
+    callMemoryProxy.mockImplementation(async ({ path }) => {
+      if (path === 'semantic') {
+        return {
+          items: [
+            {
+              key: 'librechat_personalization/timezone',
+              title: 'timezone',
+              modified_at_ms: Date.parse('2026-08-30T00:00:00.000Z'),
+              tier: 'private',
+            },
+          ],
+        };
+      }
+      return { items: [] };
+    });
+
+    // Same call signature `preflightResumeContent`'s dependencies.getUserMemories
+    // and `getRequestMemories`/`buildInlineMemoryContext` use.
+    const result = await resolved.getUserMemories({ userId: 'u1', agentId: undefined });
+
+    expect(mongoGetUserMemories).not.toHaveBeenCalled();
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ value: 'should-never-appear' })]),
+    );
+    // Parity with the Mongo model's array-of-memory-objects shape
+    // (`MemoryContentInput`: `{ key, value }` at minimum).
+    expect(result[0]).toEqual(expect.objectContaining({ key: expect.any(String) }));
   });
 });

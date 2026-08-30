@@ -16,6 +16,12 @@ const mockFormatAgentMessages = jest.fn(() => ({
   summary: undefined,
   boundaryTokenAdjustment: undefined,
 }));
+// M3-WU-D2-3c — default implementation matches the REAL
+// `resolveMemoryMethods`/`resolveMemoryWriteMethods` under the unset
+// (mongo) flag exactly: mongoMethods returned UNCHANGED (same reference).
+// Every EXISTING test in this file relies on that passthrough and is
+// unaffected; the sovereign-routing describe block below overrides it.
+const mockResolveMemoryMethods = jest.fn(({ mongoMethods }) => mongoMethods);
 
 const { Providers } = require('@librechat/agents');
 const { Constants, ContentTypes, EModelEndpoint } = require('librechat-data-provider');
@@ -1098,6 +1104,16 @@ jest.mock('~/models', () => ({
   spendStructuredTokens: jest.fn(),
   spendTokens: jest.fn(),
   updateBalance: jest.fn(),
+}));
+
+// M3-WU-D2-3c/Part B — the mongo-vs-sovereign memory routing seam. Default
+// implementation passes `mongoMethods` through UNCHANGED (matching the real
+// module's behaviour when `AUDITTRACE_MEMORY_BACKEND` is unset), so every
+// pre-existing test above is unaffected; overridden per-test below to prove
+// the sovereign-routing wiring.
+jest.mock('~/server/services/AuditTraceMemory/agentMethods', () => ({
+  resolveMemoryWriteMethods: ({ mongoMethods }) => mongoMethods,
+  resolveMemoryMethods: (...args) => mockResolveMemoryMethods(...args),
 }));
 
 // Mock getMCPManager
@@ -6204,6 +6220,180 @@ describe('AgentClient - titleConvo', () => {
         expect.any(Object),
       );
     });
+  });
+});
+
+/**
+ * M3-WU-D2-3c — closes the memory-CONTEXT READ split-brain: under
+ * `AUDITTRACE_MEMORY_BACKEND=sovereign`, `db.getFormattedMemories`/
+ * `db.getUserMemories` (Mongo) must never be called from a chat-turn
+ * memory-context read; every such read must resolve through
+ * `resolveMemoryMethods` (the SAME seam Part B built for writes — see
+ * `agentMethods.js`). These tests exercise the REAL `client.js` call sites
+ * (`#useMemory`'s early-return branch, its post-write keyed reload, and
+ * `getEventActorMemorySnapshots`) with `resolveMemoryMethods` mocked to a
+ * controllable resolver, proving the wiring itself — not just the seam in
+ * isolation (covered separately in `agentMethods.spec.js`).
+ *
+ * Non-vacuous: reverting any of these call sites to pass
+ * `getFormattedMemories: db.getFormattedMemories` directly (bypassing the
+ * resolver) makes the corresponding assertion below fail RED — the sovereign
+ * spy would never be reached and the raw Mongo mock would be called instead.
+ * Verified by hand during the build (temporarily reverting each site),
+ * restored GREEN; see the build record.
+ */
+describe('AgentClient - memory-context reads route through resolveMemoryMethods (M3-WU-D2-3c)', () => {
+  let client;
+  let mockReq;
+  let mockRes;
+  let mockAgent;
+  let mockOptions;
+  let mockCheckAccess;
+  let mockInitializeAgent;
+  let mockCreateMemoryProcessor;
+  let mockMongoGetFormattedMemories;
+  let sovereignGetFormattedMemories;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveMemoryMethods.mockImplementation(({ mongoMethods }) => mongoMethods);
+
+    mockAgent = {
+      id: 'agent-123',
+      endpoint: EModelEndpoint.openAI,
+      provider: EModelEndpoint.openAI,
+      instructions: 'Test instructions',
+      model: 'gpt-4',
+      model_parameters: { model: 'gpt-4' },
+    };
+
+    mockReq = {
+      user: { id: 'user-123', personalization: { memories: true } },
+      session: { openidTokens: { accessToken: 'user-bearer-token' } },
+      config: {
+        memory: { personalize: true },
+        endpoints: { [EModelEndpoint.agents]: { allowedProviders: [EModelEndpoint.openAI] } },
+      },
+    };
+    mockRes = {};
+    mockOptions = { req: mockReq, res: mockRes, agent: mockAgent };
+
+    mockCheckAccess = require('@librechat/api').checkAccess;
+    mockInitializeAgent = require('@librechat/api').initializeAgent;
+    mockCreateMemoryProcessor = require('@librechat/api').createMemoryProcessor;
+    mockCheckAccess.mockResolvedValue(true);
+
+    mockMongoGetFormattedMemories = require('~/models').getFormattedMemories;
+    mockMongoGetFormattedMemories.mockResolvedValue({
+      withKeys: 'MONGO-SHOULD-NEVER-APPEAR',
+      withoutKeys: 'MONGO-SHOULD-NEVER-APPEAR',
+      totalTokens: 0,
+    });
+
+    sovereignGetFormattedMemories = jest.fn().mockResolvedValue({
+      withKeys: 'sovereign: favorite_language=TypeScript',
+      withoutKeys: 'favorite_language=TypeScript',
+      totalTokens: 4,
+    });
+  });
+
+  it("under sovereign, #useMemory's early-return read (memory agent disabled) calls the resolver's function, never db.getFormattedMemories", async () => {
+    mockResolveMemoryMethods.mockImplementation(({ req, mongoMethods }) => {
+      expect(req).toBe(mockReq);
+      expect(mongoMethods).toEqual({ getFormattedMemories: mockMongoGetFormattedMemories });
+      return { getFormattedMemories: sovereignGetFormattedMemories };
+    });
+
+    client = new AgentClient(mockOptions);
+    client.conversationId = 'convo-123';
+    client.responseMessageId = 'response-123';
+
+    const result = await client.useMemory();
+
+    expect(result).toEqual({
+      withKeys: 'sovereign: favorite_language=TypeScript',
+      withoutKeys: 'favorite_language=TypeScript',
+    });
+    expect(sovereignGetFormattedMemories).toHaveBeenCalledWith({
+      userId: 'user-123',
+      agentId: undefined,
+    });
+    expect(mockMongoGetFormattedMemories).not.toHaveBeenCalled();
+  });
+
+  it('mongo (default flag): the SAME early-return read still calls db.getFormattedMemories — proves the test above is non-vacuous, not a hardcoded bypass', async () => {
+    client = new AgentClient(mockOptions);
+    client.conversationId = 'convo-123';
+    client.responseMessageId = 'response-123';
+
+    const result = await client.useMemory();
+
+    expect(result).toEqual({
+      withKeys: 'MONGO-SHOULD-NEVER-APPEAR',
+      withoutKeys: 'MONGO-SHOULD-NEVER-APPEAR',
+    });
+    expect(mockMongoGetFormattedMemories).toHaveBeenCalledWith({
+      userId: 'user-123',
+      agentId: undefined,
+    });
+    expect(sovereignGetFormattedMemories).not.toHaveBeenCalled();
+  });
+
+  it('under sovereign, the post-write keyed reload (memory agent enabled) calls the resolver’s function, never db.getFormattedMemories', async () => {
+    mockReq.config.memory = { agent: { enabled: true, id: 'agent-123' } };
+    mockInitializeAgent.mockResolvedValue({ ...mockAgent, provider: EModelEndpoint.openAI });
+    mockCreateMemoryProcessor.mockResolvedValue(['unkeyed', jest.fn()]);
+    mockResolveMemoryMethods.mockImplementation(({ mongoMethods }) =>
+      'getFormattedMemories' in mongoMethods
+        ? { getFormattedMemories: sovereignGetFormattedMemories }
+        : mongoMethods,
+    );
+
+    client = new AgentClient(mockOptions);
+    client.conversationId = 'convo-123';
+    client.responseMessageId = 'response-123';
+
+    const result = await client.useMemory();
+
+    expect(result.withKeys).toBe('sovereign: favorite_language=TypeScript');
+    expect(sovereignGetFormattedMemories).toHaveBeenCalledWith({
+      userId: 'user-123',
+      agentId: undefined,
+    });
+    expect(mockMongoGetFormattedMemories).not.toHaveBeenCalled();
+  });
+
+  it('under sovereign, getEventActorMemorySnapshots resolves additional-agent partitions through the resolver, never db.getFormattedMemories', async () => {
+    mockResolveMemoryMethods.mockImplementation(() => ({
+      getFormattedMemories: sovereignGetFormattedMemories,
+    }));
+
+    client = new AgentClient(mockOptions);
+    client.options.agent = { ...mockAgent, id: 'primary-agent' };
+    client.memoryContextPromise = Promise.resolve({ withKeys: 'primary', withoutKeys: 'primary' });
+
+    const secondaryAgent = {
+      id: 'secondary-agent',
+      tools: ['memory'],
+      memoryToolsRegistered: true,
+      memory_scope: 'agent',
+    };
+    sovereignGetFormattedMemories.mockResolvedValueOnce({
+      withKeys: 'secondary-sovereign',
+      withoutKeys: 'secondary-sovereign',
+      totalTokens: 1,
+    });
+
+    const snapshots = await client.getEventActorMemorySnapshots([
+      client.options.agent,
+      secondaryAgent,
+    ]);
+
+    expect(snapshots).toEqual(
+      expect.arrayContaining([expect.objectContaining({ withKeys: 'secondary-sovereign' })]),
+    );
+    expect(sovereignGetFormattedMemories).toHaveBeenCalled();
+    expect(mockMongoGetFormattedMemories).not.toHaveBeenCalled();
   });
 });
 

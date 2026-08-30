@@ -107,6 +107,10 @@ const { resolveConversationTitle } = require('~/server/services/Endpoints/titleP
 const { getMCPManager } = require('~/config');
 const { logViolation } = require('~/cache');
 const db = require('~/models');
+// M3-WU-D2-3c — routes the chat-turn memory-CONTEXT read (below) through the
+// SAME mongo-vs-sovereign seam Part B built for agent memory writes, so a
+// sovereign "remember this" write is visible to this turn's own context.
+const { resolveMemoryMethods } = require('~/server/services/AuditTraceMemory/agentMethods');
 
 const filterFilesByRemoteAgentAccess = (params) =>
   filterFilesByAgentAccess({ ...params, resourceType: ResourceType.REMOTE_AGENT });
@@ -903,6 +907,12 @@ const executeResponse = async (envelope, { req, res }) => {
     const mcpManager = getMCPManager();
     const configServers = await resolveConfigServers(req);
 
+    // M3-WU-D2-3c — mongo (unchanged) or sovereign, by the flag; the sovereign
+    // branch reads from the SAME adapter Part B's writes now land in.
+    const { getFormattedMemories: resolvedGetFormattedMemories } = resolveMemoryMethods({
+      req,
+      mongoMethods: { getFormattedMemories: db.getFormattedMemories },
+    });
     await Promise.all(
       modelBoundAgents.map(async (runAgent) => {
         const memoryContext = await buildInlineMemoryContext({
@@ -910,7 +920,7 @@ const executeResponse = async (envelope, { req, res }) => {
           req,
           userId: principal.userId,
           memoryAvailable,
-          getFormattedMemories: db.getFormattedMemories,
+          getFormattedMemories: resolvedGetFormattedMemories,
         });
         return applyContextToAgent({
           agent: runAgent,

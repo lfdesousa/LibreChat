@@ -78,6 +78,10 @@ const {
 const {
   acquireEventChildGenerationLease,
 } = require('~/server/services/Endpoints/agents/eventChildLease');
+// M3-WU-D2-3c — routes the resume-preflight memory-CONTEXT read (below)
+// through the SAME mongo-vs-sovereign seam Part B built for agent memory
+// writes, so a sovereign "remember this" write is visible on resume too.
+const { resolveMemoryMethods } = require('~/server/services/AuditTraceMemory/agentMethods');
 const {
   recordScheduleOutcome,
   claimScheduleResume,
@@ -1071,7 +1075,15 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
         checkpointNamespace,
         resolvedAddedAgent: req.resolvedAddedAgent,
       },
-      resumeContentProtectionDependencies,
+      {
+        ...resumeContentProtectionDependencies,
+        // M3-WU-D2-3c — mongo (unchanged) or sovereign, by the flag; the
+        // sovereign branch reads from the SAME adapter Part B's writes now
+        // land in. Overridden per-request (the static deps object above
+        // cannot carry the caller's token) rather than mutated in place.
+        getUserMemories: resolveMemoryMethods({ req, mongoMethods: { getUserMemories } })
+          .getUserMemories,
+      },
     );
   } catch (err) {
     logger.warn(
