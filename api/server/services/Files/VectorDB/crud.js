@@ -4,6 +4,14 @@ const FormData = require('form-data');
 const { logger } = require('@librechat/data-schemas');
 const { FileSources } = require('librechat-data-provider');
 const { logAxiosError, generateShortLivedToken } = require('@librechat/api');
+// M3 Sovereign-Attach WU-3 — the sovereign-memory adapter's upload arm +
+// its feature flag. `mongo` (default, unset) never even touches
+// `callConsoleFilesProxy`'s import; `uploadVectors` guards on
+// `isSovereignBackend()` BEFORE any of the `RAG_API_URL`-backed code that
+// follows it, so that legacy path is untouched when the flag is at its
+// default (same pattern `memories.js`/`agentMethods.js` already use).
+const { isSovereignBackend } = require('~/server/services/AuditTraceMemory/config');
+const { callConsoleFilesProxy } = require('~/server/services/AuditTraceMemory/consoleFilesClient');
 
 /**
  * Deletes a file from the vector database. This function takes a file object, constructs the full path, and
@@ -49,6 +57,51 @@ const deleteVectors = async (req, file) => {
 };
 
 /**
+ * The sovereign-backend arm of `uploadVectors` (M3 Sovereign-Attach WU-3).
+ * Sends the SAME file bytes the legacy `${RAG_API_URL}/embed` call below
+ * would have sent, but to the BFF's `POST /console/files` (WU-2), carrying
+ * the user's REAL Keycloak OIDC access token — read off
+ * `req.session.openidTokens.accessToken`, exactly as `memories.js`'s
+ * `getSovereignAccessToken` does — instead of a LibreChat-internal
+ * short-lived JWT. `generateShortLivedToken` is never called on this path:
+ * the fork mints nothing (see the module docstring on
+ * `AuditTraceMemory/consoleFilesClient.js`). The narrow
+ * `memory:session:write`-only exchange and the forced `layer=session` are
+ * entirely the BFF's job (WU-2, unchanged) — this function does not touch
+ * either.
+ *
+ * Preserves the SAME file-object return contract
+ * (`bytes`/`filename`/`filepath`/`embedded`) `uploadVectors` returns for
+ * the legacy path, so the composer UX is unchanged regardless of backend.
+ * A `SovereignMemoryError` (missing token → 401, a BFF/orchestrator 4xx/5xx
+ * relayed byte-faithfully) is NEVER caught here — it propagates with its
+ * `.status` intact, never reinterpreted, never retried, never a fallback
+ * to the Mongo/RAG path below.
+ *
+ * @param {object} params
+ * @param {ServerRequest} params.req
+ * @param {Express.Multer.File} params.file
+ * @returns {Promise<{ bytes: number, filename: string, filepath: string, embedded: boolean }>}
+ */
+async function uploadVectorsSovereign({ req, file }) {
+  const token = req?.session?.openidTokens?.accessToken || null;
+  const response = await callConsoleFilesProxy({
+    token,
+    filePath: file.path,
+    filename: file.originalname,
+    contentType: file.mimetype,
+  });
+  logger.debug('Response from sovereign console-files upload', response);
+
+  return {
+    bytes: file.size,
+    filename: file.originalname,
+    filepath: FileSources.vectordb,
+    embedded: true,
+  };
+}
+
+/**
  * Uploads a file to the configured Vector database
  *
  * @param {Object} params - The params object.
@@ -65,6 +118,14 @@ const deleteVectors = async (req, file) => {
  *            - bytes: The size of the file in bytes.
  */
 async function uploadVectors({ req, file, file_id, entity_id, storageMetadata }) {
+  // M3 Sovereign-Attach WU-3 — sovereign backend routes the upload
+  // through the audited BFF seam INSTEAD of `${RAG_API_URL}/embed` below.
+  // `mongo` (default) falls through to the unchanged legacy code — same
+  // reference-preserving guard-at-top pattern as `memories.js`.
+  if (isSovereignBackend()) {
+    return uploadVectorsSovereign({ req, file });
+  }
+
   if (!process.env.RAG_API_URL) {
     throw new Error('RAG_API_URL not defined');
   }
@@ -122,4 +183,8 @@ async function uploadVectors({ req, file, file_id, entity_id, storageMetadata })
 module.exports = {
   deleteVectors,
   uploadVectors,
+  // Exported for direct unit-testing of the sovereign branch (M3
+  // Sovereign-Attach WU-3) — not part of the strategy-function surface
+  // `strategies.js` consumes (that stays `uploadVectors` only).
+  uploadVectorsSovereign,
 };
