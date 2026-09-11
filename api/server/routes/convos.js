@@ -41,6 +41,7 @@ const requireJwtAuth = require('~/server/middleware/requireJwtAuth');
 const { importConversations } = require('~/server/utils/import');
 const subagentThreadTaskStore = require('~/server/services/Endpoints/agents/subagentThreadStore');
 const getLogStores = require('~/cache/getLogStores');
+const { resolveConversationMethods } = require('~/server/services/AuditTraceConversations');
 const db = require('~/models');
 
 const assistantClients = {
@@ -163,7 +164,16 @@ router.get('/', async (req, res) => {
   }
 
   try {
-    const result = await db.getConvosByCursor(req.user.id, {
+    // Console sidebar list (MongoDB-elimination WU-2): under
+    // `AUDITTRACE_MEMORY_BACKEND=sovereign` this renders from
+    // `/console/conversations` instead of Mongo — see
+    // `AuditTraceConversations/index.js`'s module docstring. Byte-identical
+    // to the Mongo call under the default flag.
+    const { getConvosByCursor } = resolveConversationMethods({
+      req,
+      mongoMethods: { getConvosByCursor: db.getConvosByCursor },
+    });
+    const result = await getConvosByCursor(req.user.id, {
       cursor,
       limit,
       isArchived,
@@ -199,7 +209,13 @@ router.get('/:parentConversationId/subagents/:threadId', subagentThreadViewHandl
 
 router.get('/:conversationId', async (req, res) => {
   const { conversationId } = req.params;
-  const convo = await db.getConvo(req.user.id, conversationId);
+  // Console single-conversation read (MongoDB-elimination WU-2) — see the
+  // `GET /` list route above for the same seam.
+  const { getConvo } = resolveConversationMethods({
+    req,
+    mongoMethods: { getConvo: db.getConvo },
+  });
+  const convo = await getConvo(req.user.id, conversationId);
 
   if (convo && convo.subagentThread == null) {
     res.status(200).json(convo);
@@ -625,7 +641,13 @@ router.post('/update', validateConvoAccess, configMiddleware, async (req, res) =
   }
 
   try {
-    const dbResponse = await db.saveConvo(
+    // Console conversation-title WRITE (MongoDB-elimination WU-2) — see the
+    // `GET /` list route above for the same seam.
+    const { saveConvo } = resolveConversationMethods({
+      req,
+      mongoMethods: { saveConvo: db.saveConvo },
+    });
+    const dbResponse = await saveConvo(
       {
         userId: req?.user?.id,
         isTemporary: req?.body?.isTemporary,

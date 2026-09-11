@@ -36,6 +36,7 @@ const {
   canReadActiveJobConversation,
   prepareMessageRequestValidation,
 } = require('~/server/middleware');
+const { resolveConversationMethods } = require('~/server/services/AuditTraceConversations');
 const db = require('~/models');
 
 const router = express.Router();
@@ -447,10 +448,20 @@ router.get('/:conversationId', prepareMessageRequestValidation, async (req, res)
   try {
     const { conversationId } = req.params;
     const validation = req.messageRequestValidation;
+    // Console message-TREE read (MongoDB-elimination WU-2): under
+    // `AUDITTRACE_MEMORY_BACKEND=sovereign` this is served from
+    // `/console/conversations/{id}/messages` instead of Mongo — see
+    // `AuditTraceConversations/index.js`'s module docstring. Byte-identical
+    // to the Mongo call under the default flag (`resolveConversationMethods`
+    // returns `db` unchanged in that case).
+    const { getMessages } = resolveConversationMethods({
+      req,
+      mongoMethods: { getMessages: db.getMessages },
+    });
     // This intentionally starts a user-scoped read before validation resolves;
     // the response remains gated on validation success below.
     const messagesPromise = validation.shouldFetchMessages
-      ? db.getMessages({ conversationId, user: req.user.id }, CLIENT_MESSAGE_SELECT).then(
+      ? getMessages({ conversationId, user: req.user.id }, CLIENT_MESSAGE_SELECT).then(
           (messages) => ({ messages }),
           (error) => ({ error }),
         )
@@ -488,7 +499,15 @@ router.post('/:conversationId', storedMessageMutationMiddleware, async (req, res
       isTemporary: req?.body?.isTemporary,
       interfaceConfig: req?.config?.interfaceConfig,
     };
-    const savedMessage = await db.saveMessage(
+    // Console message + conversation WRITE (MongoDB-elimination WU-2): under
+    // `AUDITTRACE_MEMORY_BACKEND=sovereign` these route to
+    // `/console/conversations` instead of Mongo. Byte-identical to the
+    // Mongo calls under the default flag.
+    const { saveMessage, saveConvo } = resolveConversationMethods({
+      req,
+      mongoMethods: { saveMessage: db.saveMessage, saveConvo: db.saveConvo },
+    });
+    const savedMessage = await saveMessage(
       reqCtx,
       { ...message, user: req.user.id, isUserSubmitted: true },
       { context: 'POST /api/messages/:conversationId' },
@@ -502,7 +521,7 @@ router.post('/:conversationId', storedMessageMutationMiddleware, async (req, res
       ...(message.model !== undefined && { model: savedMessage.model }),
       ...(message.iconURL !== undefined && { iconURL: savedMessage.iconURL }),
     };
-    await db.saveConvo(reqCtx, conversationUpdate, {
+    await saveConvo(reqCtx, conversationUpdate, {
       context: 'POST /api/messages/:conversationId',
       ...(savedMessage._id != null ? { appendMessageIds: [savedMessage._id] } : {}),
     });
