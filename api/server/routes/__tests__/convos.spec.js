@@ -59,6 +59,8 @@ describe('Convos Routes', () => {
     deleteMessages,
     getConvo,
     saveConvo,
+    bulkSaveConvos,
+    bulkSaveMessages,
   } = require('~/models');
   const {
     deleteAgentCheckpoints,
@@ -243,6 +245,11 @@ describe('Convos Routes', () => {
         legacyPii: {
           starterPatterns: ['sk_prefix'],
         },
+        // MongoDB-elimination WU-2 remediation: `resolveConversationMethods`
+        // returns the injected mongoMethods object UNCHANGED (same
+        // references) under the default flag — see convos-sovereign.spec.js
+        // for the flag-routing proof.
+        conversationDb: { bulkSaveConvos, bulkSaveMessages },
       });
     });
 

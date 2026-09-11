@@ -415,6 +415,54 @@ describe('forkConversation', () => {
     expect(bulkSaveConvos).not.toHaveBeenCalled();
     expect(bulkSaveMessages).not.toHaveBeenCalled();
   });
+
+  describe('injected conversationDb (MongoDB-elimination WU-2 remediation)', () => {
+    it('routes getConvo/getMessages/bulkSave* through conversationDb, never the raw Mongo functions', async () => {
+      const sovereignGetConvo = jest.fn().mockResolvedValue(mockConversation);
+      const sovereignGetMessages = jest.fn().mockResolvedValue(mockMessages);
+      const sovereignBulkSaveConvos = jest.fn().mockResolvedValue(null);
+      const sovereignBulkSaveMessages = jest.fn().mockResolvedValue(null);
+
+      await forkConversation({
+        originalConvoId: 'abc123',
+        targetMessageId: '3',
+        requestUserId: 'user1',
+        option: ForkOptions.DIRECT_PATH,
+        conversationDb: {
+          getConvo: sovereignGetConvo,
+          getMessages: sovereignGetMessages,
+          bulkSaveConvos: sovereignBulkSaveConvos,
+          bulkSaveMessages: sovereignBulkSaveMessages,
+        },
+      });
+
+      expect(sovereignGetConvo).toHaveBeenCalledWith('user1', 'abc123');
+      expect(sovereignGetMessages).toHaveBeenCalled();
+      expect(sovereignBulkSaveConvos).toHaveBeenCalled();
+      expect(sovereignBulkSaveMessages).toHaveBeenCalled();
+      expect(getConvo).not.toHaveBeenCalled();
+      expect(getMessages).not.toHaveBeenCalled();
+      expect(bulkSaveConvos).not.toHaveBeenCalled();
+      expect(bulkSaveMessages).not.toHaveBeenCalled();
+    });
+
+    /**
+     * NON-VACUOUS guard: verified by hand during the build that hardcoding
+     * `const resolvedDb = db;` (dropping the `conversationDb || db` fallback)
+     * turns the assertion above RED (`sovereignGetConvo` never called);
+     * restored, green.
+     */
+    it('falls back to the raw Mongo functions when no conversationDb is injected (byte-unchanged default)', async () => {
+      await forkConversation({
+        originalConvoId: 'abc123',
+        targetMessageId: '3',
+        requestUserId: 'user1',
+        option: ForkOptions.DIRECT_PATH,
+      });
+      expect(getConvo).toHaveBeenCalledWith('user1', 'abc123');
+      expect(bulkSaveConvos).toHaveBeenCalled();
+    });
+  });
 });
 
 describe('duplicateConversation', () => {
@@ -539,6 +587,35 @@ describe('duplicateConversation', () => {
     expect(bulkSaveConvos).not.toHaveBeenCalled();
     expect(bulkSaveMessages).not.toHaveBeenCalled();
     expect(bulkIncrementTagCounts).not.toHaveBeenCalled();
+  });
+
+  describe('injected conversationDb (MongoDB-elimination WU-2 remediation)', () => {
+    it('routes getConvo/getMessages/bulkSave* through conversationDb, never the raw Mongo functions', async () => {
+      const sovereignGetConvo = jest.fn().mockResolvedValue(mockConversation);
+      const sovereignGetMessages = jest.fn().mockResolvedValue(mockMessages);
+      const sovereignBulkSaveConvos = jest.fn().mockResolvedValue(null);
+      const sovereignBulkSaveMessages = jest.fn().mockResolvedValue(null);
+
+      await duplicateConversation({
+        userId: 'user1',
+        conversationId: 'abc123',
+        conversationDb: {
+          getConvo: sovereignGetConvo,
+          getMessages: sovereignGetMessages,
+          bulkSaveConvos: sovereignBulkSaveConvos,
+          bulkSaveMessages: sovereignBulkSaveMessages,
+        },
+      });
+
+      expect(sovereignGetConvo).toHaveBeenCalledWith('user1', 'abc123');
+      expect(sovereignGetMessages).toHaveBeenCalled();
+      expect(sovereignBulkSaveConvos).toHaveBeenCalled();
+      expect(sovereignBulkSaveMessages).toHaveBeenCalled();
+      expect(getConvo).not.toHaveBeenCalled();
+      expect(getMessages).not.toHaveBeenCalled();
+      expect(bulkSaveConvos).not.toHaveBeenCalled();
+      expect(bulkSaveMessages).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -1015,6 +1092,38 @@ describe('forkSharedConversation', () => {
     );
 
     expect(tenantDuringSave).toBe('tenant-viewer');
+  });
+
+  describe('injected conversationDb (MongoDB-elimination WU-2 remediation)', () => {
+    it('routes getConvo/getMessages/bulkSave* through conversationDb; getSharedMessages stays on the raw Mongo function (a separate persistence layer)', async () => {
+      const sovereignGetConvo = jest.fn().mockResolvedValue(mockConversation);
+      const sovereignGetMessages = jest.fn().mockResolvedValue(mockSharedMessages);
+      const sovereignBulkSaveConvos = jest.fn().mockResolvedValue(null);
+      const sovereignBulkSaveMessages = jest.fn().mockResolvedValue(null);
+
+      await forkSharedConversation({
+        shareId: 'share123',
+        requestUserId: 'user1',
+        conversationDb: {
+          getConvo: sovereignGetConvo,
+          getMessages: sovereignGetMessages,
+          bulkSaveConvos: sovereignBulkSaveConvos,
+          bulkSaveMessages: sovereignBulkSaveMessages,
+        },
+      });
+
+      expect(sovereignGetConvo).toHaveBeenCalled();
+      expect(sovereignGetMessages).toHaveBeenCalled();
+      expect(sovereignBulkSaveConvos).toHaveBeenCalled();
+      expect(sovereignBulkSaveMessages).toHaveBeenCalled();
+      expect(getConvo).not.toHaveBeenCalled();
+      expect(getMessages).not.toHaveBeenCalled();
+      expect(bulkSaveConvos).not.toHaveBeenCalled();
+      expect(bulkSaveMessages).not.toHaveBeenCalled();
+      // The SharedLink snapshot read is a SEPARATE persistence layer —
+      // unaffected by conversationDb, always the raw Mongo function.
+      expect(getSharedMessages).toHaveBeenCalled();
+    });
   });
 });
 

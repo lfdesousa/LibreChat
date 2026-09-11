@@ -264,5 +264,55 @@ describe('Convos Routes — sovereign backend dispatch (MongoDB-elimination WU-2
       );
       expect(deleteConvos).not.toHaveBeenCalled();
     });
+
+    /**
+     * `forkConversation`/`duplicateConversation`/`importConversations` are
+     * themselves mocked in this suite (their OWN `conversationDb`-injection
+     * plumbing is proved by `utils/import/fork.spec.js` and
+     * `importConversations.spec.js`) — these assertions prove ONLY that
+     * `routes/convos.js` resolves and threads a genuinely-different
+     * (sovereign) `conversationDb` into them, never the raw Mongo functions.
+     */
+    it('POST /fork resolves a conversationDb distinct from the raw Mongo functions', async () => {
+      const { forkConversation } = require('~/server/utils/import/fork');
+      const { getConvo, getMessages, bulkSaveConvos, bulkSaveMessages } = require('~/models');
+      forkConversation.mockResolvedValue({ conversation: { conversationId: 'c2' } });
+
+      await request(app).post('/api/convos/fork').send({ conversationId: 'c1', messageId: 'm1' });
+
+      const received = forkConversation.mock.calls[0][0].conversationDb;
+      expect(received.getConvo).not.toBe(getConvo);
+      expect(received.getMessages).not.toBe(getMessages);
+      expect(received.bulkSaveConvos).not.toBe(bulkSaveConvos);
+      expect(received.bulkSaveMessages).not.toBe(bulkSaveMessages);
+    });
+
+    it('POST /duplicate resolves a conversationDb distinct from the raw Mongo functions', async () => {
+      const { duplicateConversation } = require('~/server/utils/import/fork');
+      const { getConvo, getMessages, bulkSaveConvos, bulkSaveMessages } = require('~/models');
+      duplicateConversation.mockResolvedValue({ conversation: { conversationId: 'c2' } });
+
+      await request(app).post('/api/convos/duplicate').send({ conversationId: 'c1' });
+
+      const received = duplicateConversation.mock.calls[0][0].conversationDb;
+      expect(received.getConvo).not.toBe(getConvo);
+      expect(received.getMessages).not.toBe(getMessages);
+      expect(received.bulkSaveConvos).not.toBe(bulkSaveConvos);
+      expect(received.bulkSaveMessages).not.toBe(bulkSaveMessages);
+    });
+
+    it('POST /import resolves a conversationDb distinct from the raw Mongo functions', async () => {
+      const { importConversations } = require('~/server/utils/import');
+      const { bulkSaveConvos, bulkSaveMessages } = require('~/models');
+      importConversations.mockResolvedValue(undefined);
+
+      await request(app)
+        .post('/api/convos/import')
+        .attach('file', Buffer.from('{}'), 'export.json');
+
+      const received = importConversations.mock.calls[0][0].conversationDb;
+      expect(received.bulkSaveConvos).not.toBe(bulkSaveConvos);
+      expect(received.bulkSaveMessages).not.toBe(bulkSaveMessages);
+    });
   });
 });

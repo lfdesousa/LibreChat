@@ -747,6 +747,18 @@ router.post(
   restoreTenantContextFromReq,
   async (req, res) => {
     try {
+      // Console import WRITE (MongoDB-elimination WU-2 remediation) — see
+      // the `GET /` list route above for the same seam. Threaded down
+      // through `importConversations` -> `createImportBatchBuilder` ->
+      // `ImportBatchBuilder.saveBatch` (`utils/import/{importConversations,
+      // importBatchBuilder}.js`).
+      const conversationDb = resolveConversationMethods({
+        req,
+        mongoMethods: {
+          bulkSaveConvos: db.bulkSaveConvos,
+          bulkSaveMessages: db.bulkSaveMessages,
+        },
+      });
       /* TODO: optimize to return imported conversations and add manually */
       await importConversations({
         filepath: req.file.path,
@@ -754,6 +766,7 @@ router.post(
         userRole: req.user.role,
         interfaceConfig: req.config?.interfaceConfig,
         filters: req.config?.filters,
+        conversationDb,
         ...(req.config?.messageFilter?.pii == null
           ? {}
           : { legacyPii: req.config.messageFilter.pii }),
@@ -781,6 +794,17 @@ router.post('/fork', forkIpLimiter, forkUserLimiter, configMiddleware, async (re
   try {
     /** @type {TForkConvoRequest} */
     const { conversationId, messageId, option, splitAtTarget, latestMessageId } = req.body;
+    // Console fork WRITE (MongoDB-elimination WU-2 remediation) — see the
+    // `GET /` list route above for the same seam.
+    const conversationDb = resolveConversationMethods({
+      req,
+      mongoMethods: {
+        getConvo: db.getConvo,
+        getMessages: db.getMessages,
+        bulkSaveConvos: db.bulkSaveConvos,
+        bulkSaveMessages: db.bulkSaveMessages,
+      },
+    });
     const result = await forkConversation({
       requestUserId: req.user.id,
       originalConvoId: conversationId,
@@ -790,6 +814,7 @@ router.post('/fork', forkIpLimiter, forkUserLimiter, configMiddleware, async (re
       splitAtTarget,
       option,
       filters: req.config?.filters,
+      conversationDb,
       ...(req.config?.messageFilter?.pii == null
         ? {}
         : { legacyPii: req.config.messageFilter.pii }),
@@ -815,11 +840,23 @@ router.post(
     const { conversationId, title } = req.body;
 
     try {
+      // Console duplicate WRITE (MongoDB-elimination WU-2 remediation) —
+      // see the `GET /` list route above for the same seam.
+      const conversationDb = resolveConversationMethods({
+        req,
+        mongoMethods: {
+          getConvo: db.getConvo,
+          getMessages: db.getMessages,
+          bulkSaveConvos: db.bulkSaveConvos,
+          bulkSaveMessages: db.bulkSaveMessages,
+        },
+      });
       const result = await duplicateConversation({
         userId: req.user.id,
         conversationId,
         title,
         filters: req.config?.filters,
+        conversationDb,
         ...(req.config?.messageFilter?.pii == null
           ? {}
           : { legacyPii: req.config.messageFilter.pii }),

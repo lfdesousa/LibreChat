@@ -169,6 +169,9 @@ jest.mock('~/models', () => ({
   getSharedLinkFile: jest.fn(),
   backfillSharedLinkFiles: jest.fn(),
   getMessages: jest.fn(),
+  getConvo: jest.fn(),
+  bulkSaveConvos: jest.fn(),
+  bulkSaveMessages: jest.fn(),
   getRoleByName: jest.fn(),
 }));
 
@@ -1434,6 +1437,7 @@ describe('share fork route', () => {
 
     expect(response.status).toBe(201);
     expect(response.body).toEqual(forkResult);
+    const { getConvo, getMessages, bulkSaveConvos, bulkSaveMessages } = require('~/models');
     expect(forkSharedConversation).toHaveBeenCalledWith({
       shareId: 'share-123',
       shareResourceId: 'resource-123',
@@ -1444,6 +1448,69 @@ describe('share fork route', () => {
       shareRevision: '2026-01-01T00:00:00.000Z',
       snapshotFiles: true,
       sharedContentPreflight: undefined,
+      // MongoDB-elimination WU-2 remediation: `resolveConversationMethods`
+      // returns the injected mongoMethods object UNCHANGED (same
+      // references) under the default flag.
+      conversationDb: { getConvo, getMessages, bulkSaveConvos, bulkSaveMessages },
+    });
+  });
+
+  describe('sovereign backend dispatch (MongoDB-elimination WU-2 remediation)', () => {
+    const ORIGINAL_BACKEND = process.env.AUDITTRACE_MEMORY_BACKEND;
+
+    afterEach(() => {
+      if (ORIGINAL_BACKEND === undefined) {
+        delete process.env.AUDITTRACE_MEMORY_BACKEND;
+      } else {
+        process.env.AUDITTRACE_MEMORY_BACKEND = ORIGINAL_BACKEND;
+      }
+    });
+
+    /**
+     * NON-VACUOUS guard: `forkSharedConversation` is itself mocked in this
+     * suite (this file exercises the ROUTE's dispatch, not the adapter's
+     * HTTP boundary — see `AuditTraceConversations/index.spec.js` for
+     * that), so this asserts the resolved `conversationDb` it RECEIVES is
+     * a genuinely different object under sovereign, never the raw Mongo
+     * functions. Verified by hand: hardcoding `resolveConversationMethods`
+     * to always `return mongoMethods` turns this RED; restored, green.
+     */
+    it('under sovereign, resolves a conversationDb distinct from the raw Mongo functions', async () => {
+      process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+      const { getConvo, getMessages, bulkSaveConvos, bulkSaveMessages } = require('~/models');
+      forkSharedConversation.mockResolvedValue({
+        conversation: { conversationId: 'convo-456' },
+        messages: [],
+      });
+
+      await request(buildApp({ user: { id: 'user-123', role: 'USER' } }))
+        .post('/api/share/share-123/fork')
+        .send({});
+
+      const receivedConversationDb = forkSharedConversation.mock.calls[0][0].conversationDb;
+      expect(receivedConversationDb.getConvo).not.toBe(getConvo);
+      expect(receivedConversationDb.getMessages).not.toBe(getMessages);
+      expect(receivedConversationDb.bulkSaveConvos).not.toBe(bulkSaveConvos);
+      expect(receivedConversationDb.bulkSaveMessages).not.toBe(bulkSaveMessages);
+    });
+
+    it('under the default flag, resolves the raw Mongo functions unchanged', async () => {
+      delete process.env.AUDITTRACE_MEMORY_BACKEND;
+      const { getConvo, getMessages, bulkSaveConvos, bulkSaveMessages } = require('~/models');
+      forkSharedConversation.mockResolvedValue({
+        conversation: { conversationId: 'convo-456' },
+        messages: [],
+      });
+
+      await request(buildApp({ user: { id: 'user-123', role: 'USER' } }))
+        .post('/api/share/share-123/fork')
+        .send({});
+
+      const receivedConversationDb = forkSharedConversation.mock.calls[0][0].conversationDb;
+      expect(receivedConversationDb.getConvo).toBe(getConvo);
+      expect(receivedConversationDb.getMessages).toBe(getMessages);
+      expect(receivedConversationDb.bulkSaveConvos).toBe(bulkSaveConvos);
+      expect(receivedConversationDb.bulkSaveMessages).toBe(bulkSaveMessages);
     });
   });
 

@@ -13,6 +13,8 @@ const {
   getMessagesByCursor,
   getMessage,
   deleteMessages,
+  bulkSaveConvos,
+  bulkSaveMessages,
   resolveConversationMethods,
 } = require('./index');
 const { SovereignMemoryError, MissingAccessTokenError } = require('../AuditTraceMemory/errors');
@@ -672,6 +674,67 @@ describe('AuditTraceConversations adapter (MongoDB-elimination WU-2)', () => {
     });
   });
 
+  describe('bulkSaveConvos', () => {
+    it('fans out to individual saveConvo calls and returns a count', async () => {
+      // `bulkSaveConvos` fans out via `Promise.all`, so the two items' own
+      // existing-fetch-then-upsert calls interleave rather than running
+      // strictly one-after-another — branch on `method` instead of trying
+      // to predict the exact interleaved call order.
+      callConsoleConversationsProxy.mockImplementation(async ({ method }) => {
+        if (method === 'GET') {
+          throw new SovereignMemoryError('not found', 404);
+        }
+        return CONVO_ITEM;
+      });
+      const result = await bulkSaveConvos(
+        [
+          { conversationId: 'c1', title: 'One' },
+          { conversationId: 'c2', title: 'Two' },
+        ],
+        'tok',
+      );
+      expect(result).toEqual({ ok: true, count: 2 });
+    });
+
+    it('tolerates an empty/non-array input', async () => {
+      const result = await bulkSaveConvos(undefined, 'tok');
+      expect(result).toEqual({ ok: true, count: 0 });
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+    });
+
+    it('fails closed if any item fails', async () => {
+      callConsoleConversationsProxy
+        .mockRejectedValueOnce(NOT_FOUND)
+        .mockRejectedValueOnce(new SovereignMemoryError('nope', 500));
+      await expect(bulkSaveConvos([{ conversationId: 'c1' }], 'tok')).rejects.toMatchObject({
+        status: 500,
+      });
+    });
+  });
+
+  describe('bulkSaveMessages', () => {
+    it('fans out to individual saveMessage calls and returns a count', async () => {
+      callConsoleConversationsProxy
+        .mockResolvedValueOnce(MESSAGE_ITEM)
+        .mockResolvedValueOnce({ ...MESSAGE_ITEM, message_id: 'm2' });
+      const result = await bulkSaveMessages(
+        [
+          { conversationId: 'c1', messageId: 'm1', text: 'hi' },
+          { conversationId: 'c1', messageId: 'm2', text: 'there' },
+        ],
+        true,
+        'tok',
+      );
+      expect(result).toEqual({ ok: true, count: 2 });
+    });
+
+    it('tolerates an empty/non-array input', async () => {
+      const result = await bulkSaveMessages(undefined, true, 'tok');
+      expect(result).toEqual({ ok: true, count: 0 });
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('resolveConversationMethods — the Mongo-vs-sovereign routing seam', () => {
     const buildMongoMethods = () => ({
       saveConvo: jest.fn().mockResolvedValue({ mongo: true }),
@@ -686,6 +749,8 @@ describe('AuditTraceConversations adapter (MongoDB-elimination WU-2)', () => {
       getMessagesByCursor: jest.fn().mockResolvedValue({ messages: [], nextCursor: null }),
       getMessage: jest.fn().mockResolvedValue(null),
       deleteMessages: jest.fn().mockResolvedValue({ deletedCount: 0 }),
+      bulkSaveConvos: jest.fn().mockResolvedValue({ mongo: true }),
+      bulkSaveMessages: jest.fn().mockResolvedValue({ mongo: true }),
     });
 
     it('returns mongoMethods UNCHANGED (same reference) under the default mongo flag — byte-identical path', () => {
@@ -802,6 +867,15 @@ describe('AuditTraceConversations adapter (MongoDB-elimination WU-2)', () => {
 
       freshStub(async ({ method }) => (method === 'GET' ? { items: [MESSAGE_ITEM] } : undefined));
       await resolved.deleteMessages({ conversationId: 'c1' });
+
+      freshStub(notFound);
+      callConsoleConversationsProxy
+        .mockImplementationOnce(notFound)
+        .mockResolvedValueOnce(CONVO_ITEM);
+      await resolved.bulkSaveConvos([{ conversationId: 'c1' }]);
+
+      freshStub(async () => MESSAGE_ITEM);
+      await resolved.bulkSaveMessages([{ conversationId: 'c1', messageId: 'm1' }], true);
 
       // The adapter's HTTP boundary was used with the forwarded token...
       expect(callConsoleConversationsProxy).toHaveBeenCalledWith(

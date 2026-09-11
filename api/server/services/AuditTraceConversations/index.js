@@ -640,6 +640,53 @@ async function deleteMessages(filter, token) {
 }
 
 /**
+ * Bulk-creates conversations. Mirrors Mongo's
+ * `bulkSaveConvos(conversations)` signature with `token` appended.
+ *
+ * WU-1 has no bulk-upsert endpoint, so this fans out to individual
+ * `saveConvo` calls (each already fetch-then-merge safe — see the module
+ * docstring's "Metadata-clobber guard"). Used by
+ * `utils/import/importBatchBuilder.js::saveBatch` (fork/duplicate/import).
+ * A single failed item is fail-closed: `Promise.all` rejects the whole
+ * call on the first error, matching Mongo's own bulk-write's
+ * all-or-nothing-per-batch discipline closely enough for this WU (WU-1 has
+ * no bulk-write transaction semantics to match exactly either way).
+ *
+ * @param {Array<{conversationId: string, [key: string]: unknown}>} conversations
+ * @param {string|null|undefined} token
+ * @returns {Promise<{ok: true, count: number}>}
+ */
+async function bulkSaveConvos(conversations, token) {
+  const items = Array.isArray(conversations) ? conversations : [];
+  const results = await Promise.all(
+    items.map((convo) =>
+      saveConvo({ userId: convo.user, isTemporary: convo.isTemporary }, convo, undefined, token),
+    ),
+  );
+  return { ok: true, count: results.length };
+}
+
+/**
+ * Bulk-creates messages. Mirrors Mongo's
+ * `bulkSaveMessages(messages, overrideTimestamp)` signature with `token`
+ * appended. Fans out to individual `saveMessage` calls — see
+ * `bulkSaveConvos`'s docstring for the same "no bulk endpoint" rationale.
+ *
+ * @param {Array<{conversationId: string, messageId: string, [key: string]: unknown}>} messages
+ * @param {boolean} [_overrideTimestamp] - accepted for signature parity;
+ *   WU-1's message row has no separate "override timestamp" concept.
+ * @param {string|null|undefined} token
+ * @returns {Promise<{ok: true, count: number}>}
+ */
+async function bulkSaveMessages(messages, _overrideTimestamp, token) {
+  const items = Array.isArray(messages) ? messages : [];
+  const results = await Promise.all(
+    items.map((message) => saveMessage({ userId: message.user }, message, undefined, token)),
+  );
+  return { ok: true, count: results.length };
+}
+
+/**
  * One binder per shimmed method name: given the bound `token`, returns a
  * function with the EXACT positional arity Mongo callers use for that
  * name. Deliberately NOT a generic `(...args) => fn(...args, token)`
@@ -667,6 +714,9 @@ const SOVEREIGN_METHOD_BINDERS = {
   getMessagesByCursor: (token) => (filter, options) => getMessagesByCursor(filter, options, token),
   getMessage: (token) => (params) => getMessage(params, token),
   deleteMessages: (token) => (filter) => deleteMessages(filter, token),
+  bulkSaveConvos: (token) => (conversations) => bulkSaveConvos(conversations, token),
+  bulkSaveMessages: (token) => (messages, overrideTimestamp) =>
+    bulkSaveMessages(messages, overrideTimestamp, token),
 };
 
 /**
@@ -719,6 +769,8 @@ module.exports = {
   getMessagesByCursor,
   getMessage,
   deleteMessages,
+  bulkSaveConvos,
+  bulkSaveMessages,
   resolveConversationMethods,
   // Exported for direct unit testing, not part of the MethodsShaped surface.
   _internal: { extractIdList, collectAllConversationIds, fetchRawMessageItem, convoExtraMetadata },

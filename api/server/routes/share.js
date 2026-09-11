@@ -42,8 +42,12 @@ const {
   getSharedLinkFile,
   backfillSharedLinkFiles,
   getMessages,
+  getConvo,
+  bulkSaveConvos,
+  bulkSaveMessages,
   getRoleByName,
 } = require('~/models');
+const { resolveConversationMethods } = require('~/server/services/AuditTraceConversations');
 const { getStrategyFunctions } = require('~/server/services/Files/strategies');
 const { cleanFileName, getContentDisposition } = require('~/server/utils/files');
 const canAccessSharedLink = require('~/server/middleware/canAccessSharedLink');
@@ -412,6 +416,17 @@ if (allowSharedLinks) {
     sharedLinkConfigMiddleware,
     async (req, res) => {
       try {
+        // Console fork-from-share WRITE (MongoDB-elimination WU-2
+        // remediation): under `AUDITTRACE_MEMORY_BACKEND=sovereign` the
+        // NEW conversation this creates is persisted to the sovereign
+        // store instead of Mongo — same seam as `routes/convos.js`'s
+        // `POST /fork`. `getSharedMessages` (reading the anonymized
+        // SharedLink snapshot) is a SEPARATE persistence layer, always
+        // Mongo, unaffected by this.
+        const conversationDb = resolveConversationMethods({
+          req,
+          mongoMethods: { getConvo, getMessages, bulkSaveConvos, bulkSaveMessages },
+        });
         const result = await forkSharedConversation({
           shareId: req.params.shareId,
           shareResourceId: req.shareResourceId,
@@ -427,6 +442,7 @@ if (allowSharedLinks) {
             sharedFileMetadata: true,
             legacyPii: req.config?.messageFilter?.pii,
           }),
+          conversationDb,
         });
         if (!result) {
           return res.status(404).json({ message: 'Shared conversation not found' });

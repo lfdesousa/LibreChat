@@ -23,10 +23,22 @@ const { FALLBACK_MODEL_BY_ENDPOINT } = require('./defaults');
  * @param {object} [interfaceConfig] - Runtime interface config for import retention.
  * @param {object} [filters] - Source-aware content filters for submitted imports.
  * @param {object} [legacyPii] - Legacy messageFilter.pii configuration.
+ * @param {{bulkSaveConvos: Function, bulkSaveMessages: Function}} [conversationDb] -
+ *   MongoDB-elimination WU-2 remediation: the caller's already-
+ *   `resolveConversationMethods`-resolved bulk-save functions. Defaults to
+ *   the raw Mongo `bulkSaveConvos`/`bulkSaveMessages` (this module's own
+ *   top-level import) when omitted, so every EXISTING caller that has no
+ *   sovereign-routing concept is byte-unchanged.
  * @returns {ImportBatchBuilder} - The newly created ImportBatchBuilder instance.
  */
-function createImportBatchBuilder(requestUserId, interfaceConfig, filters, legacyPii) {
-  return new ImportBatchBuilder(requestUserId, interfaceConfig, filters, legacyPii);
+function createImportBatchBuilder(
+  requestUserId,
+  interfaceConfig,
+  filters,
+  legacyPii,
+  conversationDb,
+) {
+  return new ImportBatchBuilder(requestUserId, interfaceConfig, filters, legacyPii, conversationDb);
 }
 
 /**
@@ -60,12 +72,15 @@ class ImportBatchBuilder {
    * @param {object} [interfaceConfig] - Runtime interface config for import retention.
    * @param {object} [filters] - Source-aware content filters for submitted imports.
    * @param {object} [legacyPii] - Legacy messageFilter.pii configuration.
+   * @param {{bulkSaveConvos: Function, bulkSaveMessages: Function}} [conversationDb] -
+   *   see `createImportBatchBuilder`'s docstring.
    */
-  constructor(requestUserId, interfaceConfig, filters, legacyPii) {
+  constructor(requestUserId, interfaceConfig, filters, legacyPii, conversationDb) {
     this.requestUserId = requestUserId;
     this.interfaceConfig = interfaceConfig;
     this.filters = filters;
     this.legacyPii = legacyPii;
+    this.conversationDb = conversationDb;
     this.conversations = [];
     this.messages = [];
     this.retentionFields = undefined;
@@ -190,10 +205,20 @@ class ImportBatchBuilder {
       },
     );
 
+    // MongoDB-elimination WU-2 remediation: route the actual bulk writes
+    // through the caller's resolved `conversationDb` when one was
+    // injected (`resolveConversationMethods` under sovereign); otherwise
+    // fall back to the raw Mongo functions unchanged. `bulkIncrementTagCounts`
+    // has no sovereign equivalent (a Mongo-only tag-count aggregate) and
+    // always stays on Mongo — disclosed, not a conversation/message
+    // persistence method.
+    const saveConvosFn = this.conversationDb?.bulkSaveConvos ?? bulkSaveConvos;
+    const saveMessagesFn = this.conversationDb?.bulkSaveMessages ?? bulkSaveMessages;
+
     try {
       const promises = [];
-      promises.push(bulkSaveConvos(this.conversations));
-      promises.push(bulkSaveMessages(this.messages, true));
+      promises.push(saveConvosFn(this.conversations));
+      promises.push(saveMessagesFn(this.messages, true));
       promises.push(
         bulkIncrementTagCounts(
           this.requestUserId,
