@@ -1,24 +1,30 @@
 /**
  * Integration test for the ACTUAL wiring point (MongoDB-elimination
- * WU-2b): `api/models/index.js` must apply
+ * WU-2b, extended by WU-presets 2026-09-11 — the FIRST reuse of this
+ * chokepoint): `api/models/index.js` must apply
  * `AuditTraceConversations::wrapModelMethods` to the real
  * `createMethods(...)` output before exporting it, so that
  * `require('~/models')` — however a caller obtains and uses that
  * reference (a route, `utils/import/fork.js`'s `const db =
- * require('~/models')`, or an injected `methods` constructor param like
- * `services/Schedules/index.js`'s) — always resolves through the
- * chokepoint. Mocks ONLY `createMethods` (the raw Mongo methods) and the
- * adapter's own HTTP boundary (`AuditTraceConversations/client`) — the
+ * require('~/models')`, an injected `methods` constructor param like
+ * `services/Schedules/index.js`'s, or `UserController.js`'s own
+ * module-load-time `const db = require('~/models')`) — always resolves
+ * through the chokepoint, for BOTH the conversation/message methods
+ * (WU-2b) AND the preset methods (WU-presets). Mocks ONLY `createMethods`
+ * (the raw Mongo methods) and the adapter's own HTTP boundaries
+ * (`AuditTraceConversations/client`, `AuditTracePresets/client`) — the
  * chokepoint wiring itself (`wrapModelMethods`, `api/models/index.js`)
  * is REAL, unmocked code.
  */
 const mockSaveConvo = jest.fn();
+const mockDeletePresets = jest.fn();
 const mockGetUserById = jest.fn();
 
 jest.mock('mongoose', () => ({}));
 jest.mock('@librechat/data-schemas', () => ({
   createMethods: jest.fn(() => ({
     saveConvo: mockSaveConvo,
+    deletePresets: mockDeletePresets,
     getUserById: mockGetUserById,
   })),
 }));
@@ -31,10 +37,14 @@ jest.mock('~/cache/getLogStores', () => jest.fn());
 jest.mock('~/server/services/AuditTraceConversations/client', () => ({
   callConsoleConversationsProxy: jest.fn(),
 }));
+jest.mock('~/server/services/AuditTracePresets/client', () => ({
+  callConsolePresetsProxy: jest.fn(),
+}));
 
 const {
   callConsoleConversationsProxy,
 } = require('~/server/services/AuditTraceConversations/client');
+const { callConsolePresetsProxy } = require('~/server/services/AuditTracePresets/client');
 const {
   runWithRequestAccessToken,
 } = require('~/server/services/AuditTraceConversations/requestContext');
@@ -98,5 +108,75 @@ describe('api/models/index.js — the chokepoint is actually wired at the real e
 
     expect(mockSaveConvo).toHaveBeenCalledWith({ userId: 'u1' }, { conversationId: 'c1' }, {});
     expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+  });
+
+  // ── WU-presets (2026-09-11) — the FIRST reuse of this chokepoint ──────
+
+  it('exports deletePresets wrapped: default flag calls the raw Mongo method unchanged', async () => {
+    delete process.env.AUDITTRACE_MEMORY_BACKEND;
+    const models = require('./index');
+    await models.deletePresets('u1', {});
+    expect(mockDeletePresets).toHaveBeenCalledWith('u1', {});
+    expect(callConsolePresetsProxy).not.toHaveBeenCalled();
+  });
+
+  it('under sovereign WITH a request-context token, require("~/models").deletePresets routes to the sovereign preset adapter and NEVER calls the raw Mongo function', async () => {
+    process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+    const models = require('./index');
+    callConsolePresetsProxy.mockResolvedValueOnce({});
+
+    const result = await runWithRequestAccessToken({ accessToken: 'user-bearer-token' }, () =>
+      models.deletePresets('u1', { presetId: 'p1' }),
+    );
+
+    expect(result).toEqual({ acknowledged: true, deletedCount: 1 });
+    expect(callConsolePresetsProxy).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 'user-bearer-token', method: 'DELETE', path: 'p1' }),
+    );
+    expect(mockDeletePresets).not.toHaveBeenCalled();
+  });
+
+  it('under sovereign with NO request-context token (a background job), deletePresets falls to the raw Mongo function — the SAME disclosed boundary as conversations', async () => {
+    process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+    const models = require('./index');
+
+    await models.deletePresets('u1', {});
+
+    expect(mockDeletePresets).toHaveBeenCalledWith('u1', {});
+    expect(callConsolePresetsProxy).not.toHaveBeenCalled();
+  });
+
+  it('the WU-2b `schedules.js`/`UserController.js` injected-reference trap: a `~/models` reference captured ONCE at module load (e.g. `const db = require("~/models")`) still routes deletePresets through the chokepoint on every later call, because Node caches the module and wrapModelMethods dispatches AT CALL TIME, not at wrap time', async () => {
+    process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+    // Simulates `api/server/controllers/UserController.js`'s module-load-time
+    // `const db = require('~/models')` — captured into a local binding
+    // BEFORE any request-scoped token exists.
+    const db = require('./index');
+    callConsolePresetsProxy.mockResolvedValueOnce({});
+
+    // First call: no live request (e.g. this module's own load-time code
+    // path) — falls to Mongo, per the disclosed boundary.
+    await db.deletePresets('u1', {});
+    expect(mockDeletePresets).toHaveBeenCalledTimes(1);
+    expect(callConsolePresetsProxy).not.toHaveBeenCalled();
+
+    // A LATER call, from inside a real request's handler, using the SAME
+    // captured `db` reference — routes to sovereign because the wrapper
+    // reads the request context fresh on every invocation.
+    const result = await runWithRequestAccessToken({ accessToken: 'later-token' }, () =>
+      db.deletePresets('u1', { presetId: 'p1' }),
+    );
+    expect(result).toEqual({ acknowledged: true, deletedCount: 1 });
+    expect(callConsolePresetsProxy).toHaveBeenCalledWith(
+      expect.objectContaining({ token: 'later-token' }),
+    );
+    // The earlier Mongo call is still the only Mongo call — the SAME `db`
+    // reference correctly serves both backends across its lifetime.
+    expect(mockDeletePresets).toHaveBeenCalledTimes(1);
+  });
+
+  it('a non-conversation, non-preset export (getUserById) is STILL untouched — same function reference', () => {
+    const models = require('./index');
+    expect(models.getUserById).toBe(mockGetUserById);
   });
 });
