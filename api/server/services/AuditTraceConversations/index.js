@@ -70,9 +70,19 @@
  * `getPresets`, `savePreset`, `deletePresets`) is merged into
  * `ALL_SOVEREIGN_METHOD_BINDERS` below — see that module's docstring for
  * its own full "ground the surface" enumeration and disclosed v1
- * simplifications. Every OTHER `~/models` export (users, roles, files,
- * agent-event actors, subagent threads, …) still passes through
- * `wrapModelMethods` unchanged.
+ * simplifications.
+ *
+ * **WU-prompts extension (2026-09-11, SECOND reuse of this chokepoint).**
+ * `../AuditTracePrompts::SOVEREIGN_METHOD_BINDERS` (`createPromptGroup`,
+ * `savePrompt`, `getPromptGroup`, `getPrompt`, `getPrompts`,
+ * `updatePromptGroup`, `makePromptProduction`, `deletePromptGroup`,
+ * `deleteUserPrompts`, `incrementPromptGroupUsage`) is ALSO merged into
+ * `ALL_SOVEREIGN_METHOD_BINDERS` below — see that module's docstring for
+ * its own ground-the-surface enumeration, the ACL/sharing methods it
+ * deliberately leaves unwired (no sovereign equivalent), and the
+ * single-version-delete store-capability gap. Every OTHER `~/models`
+ * export (users, roles, files, agent-event actors, subagent threads, …)
+ * still passes through `wrapModelMethods` unchanged.
  */
 
 const { callConsoleConversationsProxy } = require('./client');
@@ -96,6 +106,11 @@ const { getRequestAccessToken } = require('./requestContext');
 const {
   SOVEREIGN_METHOD_BINDERS: PRESET_SOVEREIGN_METHOD_BINDERS,
 } = require('../AuditTracePresets');
+// MongoDB-elimination WU-prompts (2026-09-11, the SECOND reuse of this
+// chokepoint) — same discipline as the WU-presets merge above.
+const {
+  SOVEREIGN_METHOD_BINDERS: PROMPT_SOVEREIGN_METHOD_BINDERS,
+} = require('../AuditTracePrompts');
 
 const COLLECT_ALL_PAGE_SIZE = 100;
 const DEFAULT_MESSAGES_BY_CURSOR_LIMIT = 25;
@@ -754,23 +769,27 @@ const SOVEREIGN_METHOD_BINDERS = {
  * The FULL chokepoint binder map — conversation/message binders (above)
  * merged with `AuditTracePresets::SOVEREIGN_METHOD_BINDERS`
  * (MongoDB-elimination WU-presets, 2026-09-11: the FIRST reuse of this
- * chokepoint pattern for a domain other than conversations). Adding a
- * FUTURE domain's binders (prompts, agents, ...) means adding one more
- * spread here — `wrapModelMethods` itself, `api/models/index.js`'s single
- * call site, and the `AsyncLocalStorage` in `./requestContext` all stay
- * unchanged, which is the whole point of the pivot: completeness is
- * structural per EXPORT POINT, not per domain.
+ * chokepoint pattern for a domain other than conversations) AND
+ * `AuditTracePrompts::SOVEREIGN_METHOD_BINDERS` (WU-prompts, the SAME
+ * day: the SECOND reuse). Adding a FUTURE domain's binders (agents,
+ * files, ...) means adding one more spread here — `wrapModelMethods`
+ * itself, `api/models/index.js`'s single call site, and the
+ * `AsyncLocalStorage` in `./requestContext` all stay unchanged, which is
+ * the whole point of the pivot: completeness is structural per EXPORT
+ * POINT, not per domain.
  */
 const ALL_SOVEREIGN_METHOD_BINDERS = {
   ...SOVEREIGN_METHOD_BINDERS,
   ...PRESET_SOVEREIGN_METHOD_BINDERS,
+  ...PROMPT_SOVEREIGN_METHOD_BINDERS,
 };
 
 /**
  * THE CHOKEPOINT (MongoDB-elimination WU-2b — the model-layer pivot,
  * 2026-09-11, RATIFIED after three route-level-wiring REJECTs; extended
- * by WU-presets the SAME day to cover preset methods too — the FIRST
- * reuse of this pattern, see `ALL_SOVEREIGN_METHOD_BINDERS` above). Wraps
+ * by WU-presets THE SAME DAY to cover preset methods (the FIRST reuse of
+ * this pattern), then by WU-prompts to also cover prompt methods (the
+ * SECOND reuse) — see `ALL_SOVEREIGN_METHOD_BINDERS` above). Wraps
  * EVERY method in `mongoMethods` that has an `ALL_SOVEREIGN_METHOD_BINDERS`
  * entry with a function that decides, AT CALL TIME (not at wrap time),
  * which backend serves THIS call:
@@ -807,10 +826,11 @@ const ALL_SOVEREIGN_METHOD_BINDERS = {
  *
  * A `mongoMethods` key with no `ALL_SOVEREIGN_METHOD_BINDERS` entry
  * (every OTHER `~/models` export — users, roles, files, agent-event
- * actors, subagent threads, …) is returned unchanged; this function only
- * ever touches the named conversation/message/preset methods (the
- * `AuditTracePresets` merge above is the WU-presets extension — see this
- * module's docstring's "Method coverage" section).
+ * actors, subagent threads, prompt ACL/sharing methods, …) is returned
+ * unchanged; this function only ever touches the named conversation/
+ * message/preset/prompt methods (the `AuditTracePresets`/
+ * `AuditTracePrompts` merges above are the WU-presets/WU-prompts
+ * extensions — see this module's docstring's "Method coverage" section).
  *
  * @param {Record<string, Function>} mongoMethods - the FULL `createMethods(...)`
  *   output (or any object containing some of the same-named methods).

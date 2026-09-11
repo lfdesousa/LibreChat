@@ -28,12 +28,19 @@ const seedDatabase = async () => {
  * happens here, ONCE, for all of them. Extended by WU-presets (2026-09-11,
  * the first reuse of this pattern) to also cover the preset methods
  * (`getPreset`/`getPresets`/`savePreset`/`deletePresets` —
- * `server/services/AuditTracePresets/index.js`), merged into the SAME
- * `wrapModelMethods()` call below — still exactly one call site, one
- * `AsyncLocalStorage`. Every other `~/models` export (users, roles, files,
- * agent-event actors, subagent threads, …) passes through
- * `wrapModelMethods` unchanged — this only touches the named
- * conversation/message/preset methods.
+ * `server/services/AuditTracePresets/index.js`), then by WU-prompts the
+ * SAME day (the second reuse) to also cover the prompt-persistence
+ * methods (`createPromptGroup`/`savePrompt`/`getPromptGroup`/`getPrompt`/
+ * `getPrompts`/`updatePromptGroup`/`makePromptProduction`/
+ * `deletePromptGroup`/`deleteUserPrompts`/`incrementPromptGroupUsage` —
+ * `server/services/AuditTracePrompts/index.js`; the prompt ACL/sharing
+ * methods and single-version delete deliberately stay unwired, see that
+ * module's docstring), both merged into the SAME `wrapModelMethods()`
+ * call below — still exactly one call site, one `AsyncLocalStorage`.
+ * Every other `~/models` export (users, roles, files, agent-event
+ * actors, subagent threads, …) passes through `wrapModelMethods`
+ * unchanged — this only touches the named conversation/message/preset/
+ * prompt methods.
  */
 const wrappedMethods = wrapModelMethods(methods);
 
