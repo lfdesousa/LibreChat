@@ -39,6 +39,9 @@ const { forkConversation, duplicateConversation } = require('~/server/utils/impo
 const { storage, importFileFilter } = require('~/server/routes/files/multer');
 const requireJwtAuth = require('~/server/middleware/requireJwtAuth');
 const { importConversations } = require('~/server/utils/import');
+const {
+  restoreRequestAccessTokenContext,
+} = require('~/server/services/AuditTraceConversations/requestContext');
 const subagentThreadTaskStore = require('~/server/services/Endpoints/agents/subagentThreadStore');
 const getLogStores = require('~/cache/getLogStores');
 const db = require('~/models');
@@ -677,6 +680,14 @@ router.post(
   configMiddleware,
   handleUpload,
   restoreTenantContextFromReq,
+  // MongoDB-elimination WU-2b: multer's multipart parser can drop
+  // AsyncLocalStorage propagation (the same reason
+  // `restoreTenantContextFromReq` above exists) — re-establish the
+  // sovereign chokepoint's access-token context so `importConversations`'s
+  // eventual `~/models` calls see it. Infrastructure re-entry, not
+  // per-route sovereign wiring (the chokepoint itself lives in
+  // `api/models/index.js`).
+  restoreRequestAccessTokenContext,
   async (req, res) => {
     try {
       /* TODO: optimize to return imported conversations and add manually */

@@ -10,6 +10,9 @@ const {
   recordRumProxyRequest,
   getValidOpenIdReuseUserId,
 } = require('@librechat/api');
+const {
+  runWithRequestAccessToken,
+} = require('~/server/services/AuditTraceConversations/requestContext');
 
 const hasPassportStrategy = (strategy) =>
   typeof passport._strategy === 'function' && passport._strategy(strategy) != null;
@@ -189,7 +192,21 @@ const requireJwtAuth = (req, res, next) => {
         if (tenantErr) {
           return next(tenantErr);
         }
-        refreshCloudFrontCookies(req, res, next);
+        // MongoDB-elimination WU-2b: propagate the user's OIDC console
+        // access token (if the console login flow set one — see
+        // `AuthService.js`'s `req.session.openidTokens`) into the
+        // dedicated AsyncLocalStorage the `~/models` conversation/message
+        // chokepoint reads from (`AuditTraceConversations/index.js
+        // ::wrapModelMethods`). Absent for requests with no OIDC console
+        // session (e.g. OpenCode's device-flow-only clients) — those calls
+        // correctly fall through to Mongo/the default, unaffected.
+        runWithRequestAccessToken(
+          {
+            accessToken: req.session?.openidTokens?.accessToken,
+            sub: req.user?.id,
+          },
+          () => refreshCloudFrontCookies(req, res, next),
+        );
       });
     })(req, res, next);
   };
