@@ -47,11 +47,12 @@
  * `updateMessage` both fetch the EXISTING row first and merge the
  * caller's delta on top of it before building the request body.
  *
- * **Method coverage.** `SOVEREIGN_METHOD_BINDERS` names every chokepointed
- * method: the 9 the original spec named, plus `getConvoOwnership` (aliased
- * to `getConvo`), `setConvoPinned`, `getMessagesByCursor` (client-side
- * sort/paginate — WU-1's message-tree endpoint has no native pagination),
- * and `bulkSaveConvos`/`bulkSaveMessages` (fan out to individual
+ * **Method coverage.** `SOVEREIGN_METHOD_BINDERS` (this module) names
+ * every chokepointed conversation/message method: the 9 the original
+ * spec named, plus `getConvoOwnership` (aliased to `getConvo`),
+ * `setConvoPinned`, `getMessagesByCursor` (client-side sort/paginate —
+ * WU-1's message-tree endpoint has no native pagination), and
+ * `bulkSaveConvos`/`bulkSaveMessages` (fan out to individual
  * `saveConvo`/`saveMessage` calls — WU-1 has no bulk endpoint).
  * `forkConversation`/`duplicateConversation`/`forkSharedConversation`
  * (`utils/import/fork.js`) and `ImportBatchBuilder.saveBatch`
@@ -63,6 +64,15 @@
  * generation/chat pipeline as its own tracked follow-up; the one honest
  * no-live-token background-writes category this chokepoint cannot and
  * must not fake its way around).
+ *
+ * **WU-presets extension (2026-09-11, FIRST reuse of this chokepoint).**
+ * `../AuditTracePresets::SOVEREIGN_METHOD_BINDERS` (`getPreset`,
+ * `getPresets`, `savePreset`, `deletePresets`) is merged into
+ * `ALL_SOVEREIGN_METHOD_BINDERS` below — see that module's docstring for
+ * its own full "ground the surface" enumeration and disclosed v1
+ * simplifications. Every OTHER `~/models` export (users, roles, files,
+ * agent-event actors, subagent threads, …) still passes through
+ * `wrapModelMethods` unchanged.
  */
 
 const { callConsoleConversationsProxy } = require('./client');
@@ -78,6 +88,14 @@ const {
 const { SovereignMemoryError } = require('../AuditTraceMemory/errors');
 const { isSovereignBackend } = require('../AuditTraceMemory/config');
 const { getRequestAccessToken } = require('./requestContext');
+// MongoDB-elimination WU-presets (2026-09-11, the FIRST reuse of this
+// chokepoint): the preset adapter's binders are merged into
+// `ALL_SOVEREIGN_METHOD_BINDERS` below, NOT wired via a second
+// `wrapModelMethods` call site or a second `AsyncLocalStorage` — see this
+// module's docstring's "Method coverage" section.
+const {
+  SOVEREIGN_METHOD_BINDERS: PRESET_SOVEREIGN_METHOD_BINDERS,
+} = require('../AuditTracePresets');
 
 const COLLECT_ALL_PAGE_SIZE = 100;
 const DEFAULT_MESSAGES_BY_CURSOR_LIMIT = 25;
@@ -733,9 +751,27 @@ const SOVEREIGN_METHOD_BINDERS = {
 };
 
 /**
+ * The FULL chokepoint binder map — conversation/message binders (above)
+ * merged with `AuditTracePresets::SOVEREIGN_METHOD_BINDERS`
+ * (MongoDB-elimination WU-presets, 2026-09-11: the FIRST reuse of this
+ * chokepoint pattern for a domain other than conversations). Adding a
+ * FUTURE domain's binders (prompts, agents, ...) means adding one more
+ * spread here — `wrapModelMethods` itself, `api/models/index.js`'s single
+ * call site, and the `AsyncLocalStorage` in `./requestContext` all stay
+ * unchanged, which is the whole point of the pivot: completeness is
+ * structural per EXPORT POINT, not per domain.
+ */
+const ALL_SOVEREIGN_METHOD_BINDERS = {
+  ...SOVEREIGN_METHOD_BINDERS,
+  ...PRESET_SOVEREIGN_METHOD_BINDERS,
+};
+
+/**
  * THE CHOKEPOINT (MongoDB-elimination WU-2b — the model-layer pivot,
- * 2026-09-11, RATIFIED after three route-level-wiring REJECTs). Wraps
- * EVERY method in `mongoMethods` that has a `SOVEREIGN_METHOD_BINDERS`
+ * 2026-09-11, RATIFIED after three route-level-wiring REJECTs; extended
+ * by WU-presets the SAME day to cover preset methods too — the FIRST
+ * reuse of this pattern, see `ALL_SOVEREIGN_METHOD_BINDERS` above). Wraps
+ * EVERY method in `mongoMethods` that has an `ALL_SOVEREIGN_METHOD_BINDERS`
  * entry with a function that decides, AT CALL TIME (not at wrap time),
  * which backend serves THIS call:
  *
@@ -769,10 +805,12 @@ const SOVEREIGN_METHOD_BINDERS = {
  * `AuditTraceConversations`/the chokepoint NEVER fabricates a token to
  * force a background write through.
  *
- * A `mongoMethods` key with no `SOVEREIGN_METHOD_BINDERS` entry (every
- * OTHER `~/models` export — users, presets, roles, files, agent-event
+ * A `mongoMethods` key with no `ALL_SOVEREIGN_METHOD_BINDERS` entry
+ * (every OTHER `~/models` export — users, roles, files, agent-event
  * actors, subagent threads, …) is returned unchanged; this function only
- * ever touches the named conversation/message methods.
+ * ever touches the named conversation/message/preset methods (the
+ * `AuditTracePresets` merge above is the WU-presets extension — see this
+ * module's docstring's "Method coverage" section).
  *
  * @param {Record<string, Function>} mongoMethods - the FULL `createMethods(...)`
  *   output (or any object containing some of the same-named methods).
@@ -782,12 +820,12 @@ const SOVEREIGN_METHOD_BINDERS = {
  */
 function wrapModelMethods(mongoMethods) {
   const wrapped = { ...mongoMethods };
-  for (const name of Object.keys(SOVEREIGN_METHOD_BINDERS)) {
+  for (const name of Object.keys(ALL_SOVEREIGN_METHOD_BINDERS)) {
     const mongoFn = mongoMethods[name];
     if (typeof mongoFn !== 'function') {
       continue;
     }
-    const binder = SOVEREIGN_METHOD_BINDERS[name];
+    const binder = ALL_SOVEREIGN_METHOD_BINDERS[name];
     wrapped[name] = (...args) => {
       const token = isSovereignBackend() ? getRequestAccessToken() : undefined;
       if (token) {

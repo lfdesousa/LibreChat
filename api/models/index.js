@@ -24,11 +24,16 @@ const seedDatabase = async () => {
  * for the full rationale). Every caller of `require('~/models')` — routes,
  * controllers, `utils/import/fork.js`'s `const db = require('~/models')`,
  * `services/Schedules/index.js`'s injected `methods` param — receives
- * these SAME wrapped conversation/message method references, so
- * sovereign-vs-Mongo dispatch happens here, ONCE, for all of them.
- * Every other `~/models` export (users, presets, roles, files, agent-event
- * actors, subagent threads, …) passes through `wrapModelMethods`
- * unchanged — this only touches the named conversation/message methods.
+ * these SAME wrapped method references, so sovereign-vs-Mongo dispatch
+ * happens here, ONCE, for all of them. Extended by WU-presets (2026-09-11,
+ * the first reuse of this pattern) to also cover the preset methods
+ * (`getPreset`/`getPresets`/`savePreset`/`deletePresets` —
+ * `server/services/AuditTracePresets/index.js`), merged into the SAME
+ * `wrapModelMethods()` call below — still exactly one call site, one
+ * `AsyncLocalStorage`. Every other `~/models` export (users, roles, files,
+ * agent-event actors, subagent threads, …) passes through
+ * `wrapModelMethods` unchanged — this only touches the named
+ * conversation/message/preset methods.
  */
 const wrappedMethods = wrapModelMethods(methods);
 
