@@ -1,9 +1,15 @@
 /**
  * Route-level dispatch tests for MongoDB-elimination WU-2 —
  * `AUDITTRACE_MEMORY_BACKEND` flip between the legacy Mongo path and the
- * sovereign `AuditTraceConversations` adapter, at the THREE `routes/convos.js`
- * call sites wired to `resolveConversationMethods` (`GET /`, `GET /:id`,
- * `POST /update`).
+ * sovereign `AuditTraceConversations` adapter, at every `routes/convos.js`
+ * call site wired to `resolveConversationMethods` (`GET /`, `GET /:id`,
+ * `POST /update`, `POST /archive`, `POST /pin`, `DELETE /`, `DELETE /all`).
+ *
+ * The `DELETE /`/`DELETE /all`/`POST /archive`/`POST /pin` coverage was
+ * added 2026-09-11 (remediation pass) — the independent reviewer's first
+ * round correctly rejected the original WU-2 for leaving these EXACT
+ * routes on Mongo while claiming the shim complete (a real Rule-1 gap: a
+ * sovereign-only conversation would silently fail to delete/archive/pin).
  *
  * Mirrors `routes/memories.sovereign.test.js`'s idiom: `convos.spec.js` (the
  * pre-existing suite, untouched in behaviour — still green after this WU's
@@ -60,9 +66,19 @@ void moderateText;
 void messageIpLimiter;
 void messageUserLimiter;
 
+const { SovereignMemoryError } = require('~/server/services/AuditTraceMemory/errors');
+
+const NOT_FOUND = () => Promise.reject(new SovereignMemoryError('not found', 404));
+
 describe('Convos Routes — sovereign backend dispatch (MongoDB-elimination WU-2)', () => {
   let app;
-  const { getConvosByCursor, getConvo, saveConvo } = require('~/models');
+  const {
+    getConvosByCursor,
+    getConvo,
+    saveConvo,
+    setConvoPinned,
+    deleteConvos,
+  } = require('~/models');
   const {
     callConsoleConversationsProxy,
   } = require('~/server/services/AuditTraceConversations/client');
@@ -108,6 +124,26 @@ describe('Convos Routes — sovereign backend dispatch (MongoDB-elimination WU-2
       expect(getConvo).toHaveBeenCalledWith('test-user-123', 'c1');
       expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
     });
+
+    it('POST /pin calls the Mongo model, never the sovereign HTTP boundary', async () => {
+      setConvoPinned.mockResolvedValueOnce({ conversationId: 'c1', pinned: true });
+      await request(app)
+        .post('/api/convos/pin')
+        .send({ arg: { conversationId: 'c1', pinned: true } })
+        .expect(200);
+      expect(setConvoPinned).toHaveBeenCalledWith('test-user-123', 'c1', true);
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+    });
+
+    it('DELETE / calls the Mongo model, never the sovereign HTTP boundary', async () => {
+      deleteConvos.mockResolvedValueOnce({ conversationIds: ['c1'], deletedCount: 1 });
+      await request(app)
+        .delete('/api/convos')
+        .send({ arg: { conversationId: 'c1' } })
+        .expect(201);
+      expect(deleteConvos).toHaveBeenCalled();
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+    });
   });
 
   describe('sovereign flag', () => {
@@ -142,7 +178,7 @@ describe('Convos Routes — sovereign backend dispatch (MongoDB-elimination WU-2
     });
 
     it('POST /update routes the title write to the sovereign adapter and NEVER calls the Mongo model', async () => {
-      callConsoleConversationsProxy.mockResolvedValueOnce({
+      callConsoleConversationsProxy.mockImplementationOnce(NOT_FOUND).mockResolvedValueOnce({
         conversation_id: 'c1',
         title: 'New title',
         is_temporary: false,
@@ -162,6 +198,71 @@ describe('Convos Routes — sovereign backend dispatch (MongoDB-elimination WU-2
         }),
       );
       expect(saveConvo).not.toHaveBeenCalled();
+    });
+
+    it('POST /archive routes the archive write to the sovereign adapter and NEVER calls the Mongo model', async () => {
+      callConsoleConversationsProxy.mockImplementationOnce(NOT_FOUND).mockResolvedValueOnce({
+        conversation_id: 'c1',
+        title: 't',
+        is_temporary: false,
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        metadata: { isArchived: true },
+      });
+      const res = await request(app)
+        .post('/api/convos/archive')
+        .send({ arg: { conversationId: 'c1', isArchived: true } })
+        .expect(200);
+      expect(res.body.isArchived).toBe(true);
+      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'POST',
+          path: '',
+          body: expect.objectContaining({ conversation_id: 'c1', metadata: { isArchived: true } }),
+        }),
+      );
+      expect(saveConvo).not.toHaveBeenCalled();
+    });
+
+    it('POST /pin routes the pin write to the sovereign adapter and NEVER calls the Mongo model', async () => {
+      callConsoleConversationsProxy.mockImplementationOnce(NOT_FOUND).mockResolvedValueOnce({
+        conversation_id: 'c1',
+        title: 't',
+        is_temporary: false,
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        metadata: { pinned: true },
+      });
+      const res = await request(app)
+        .post('/api/convos/pin')
+        .send({ arg: { conversationId: 'c1', pinned: true } })
+        .expect(200);
+      expect(res.body.pinned).toBe(true);
+      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'POST', path: '' }),
+      );
+      expect(setConvoPinned).not.toHaveBeenCalled();
+    });
+
+    it('DELETE / (single conversationId) routes to the sovereign adapter and NEVER calls the Mongo model', async () => {
+      callConsoleConversationsProxy.mockResolvedValueOnce(undefined); // DELETE c1
+      await request(app)
+        .delete('/api/convos')
+        .send({ arg: { conversationId: 'c1' } })
+        .expect(201);
+      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'DELETE', path: 'c1' }),
+      );
+      expect(deleteConvos).not.toHaveBeenCalled();
+    });
+
+    it('DELETE /all routes to the sovereign adapter (collect-all pass) and NEVER calls the Mongo model', async () => {
+      callConsoleConversationsProxy.mockResolvedValueOnce({ items: [], next_cursor: null });
+      await request(app).delete('/api/convos/all').expect(201);
+      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'GET', path: '' }),
+      );
+      expect(deleteConvos).not.toHaveBeenCalled();
     });
   });
 });

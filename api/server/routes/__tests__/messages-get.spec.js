@@ -674,6 +674,7 @@ describe('message route conversation ownership filters', () => {
       content: [{ text: 'new content' }],
     });
     expect(updateMessage).toHaveBeenCalledWith(authenticatedUserId, {
+      conversationId: 'convo-1',
       messageId: 'message-1',
       content: [{ type: 'text', text: 'new content' }],
       tokenCount: 10,
@@ -699,6 +700,7 @@ describe('message route conversation ownership filters', () => {
 
     expect(response.status).toBe(200);
     expect(updateMessage).toHaveBeenCalledWith(authenticatedUserId, {
+      conversationId: 'convo-1',
       messageId: 'message-1',
       text: 'User replacement for assistant prose',
       tokenCount: 10,

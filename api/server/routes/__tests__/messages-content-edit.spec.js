@@ -98,6 +98,7 @@ describe('PUT /:conversationId/:messageId content edit', () => {
 
     expect(response.status).toBe(200);
     expect(updateMessage).toHaveBeenCalledWith('user-1', {
+      conversationId: 'conversation-1',
       messageId: 'message-1',
       tokenCount: 10,
       content: [
@@ -165,6 +166,7 @@ describe('PUT /:conversationId/:messageId content edit', () => {
 
     expect(response.status).toBe(200);
     expect(updateMessage).toHaveBeenCalledWith('user-1', {
+      conversationId: 'conversation-1',
       messageId: 'message-1',
       tokenCount: 10,
       content: [
@@ -211,6 +213,7 @@ describe('PUT /:conversationId/:messageId content edit', () => {
 
     expect(response.status).toBe(200);
     expect(updateMessage).toHaveBeenCalledWith('user-1', {
+      conversationId: 'conversation-1',
       messageId: 'message-1',
       tokenCount: 10,
       content: [

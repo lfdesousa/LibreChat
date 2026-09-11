@@ -1,9 +1,19 @@
 /**
  * Route-level dispatch tests for MongoDB-elimination WU-2 —
  * `AUDITTRACE_MEMORY_BACKEND` flip between the legacy Mongo path and the
- * sovereign `AuditTraceConversations` adapter, at the TWO `routes/messages.js`
- * call sites wired to `resolveConversationMethods` (`GET /:conversationId`
- * message-tree read, `POST /:conversationId` save-message-and-convo write).
+ * sovereign `AuditTraceConversations` adapter, at every `routes/messages.js`
+ * call site wired to `resolveConversationMethods` (`GET /:conversationId`
+ * message-tree read, `POST /:conversationId` save-message-and-convo write,
+ * `GET /:conversationId/:messageId` single-message read,
+ * `PUT /:conversationId/:messageId` text edit,
+ * `DELETE /:conversationId/:messageId` single-message delete).
+ *
+ * The single-message GET/PUT/DELETE coverage was added 2026-09-11
+ * (remediation pass) — the independent reviewer's first round correctly
+ * rejected the original WU-2 for leaving these EXACT routes on Mongo while
+ * claiming the shim complete (a real Rule-1 gap: a sovereign-only message
+ * would silently fail to edit/delete, or 404 as "not found" on a GET that
+ * should have succeeded).
  *
  * Mirrors `convos-sovereign.spec.js`'s idiom (see that file's docstring for
  * the shared rationale + non-vacuous-neuter note). Only the adapter's own
@@ -76,15 +86,28 @@ jest.mock('~/models', () => ({
   saveConvo: jest.fn(),
   saveMessage: jest.fn(),
   getMessages: jest.fn(),
+  updateMessage: jest.fn(),
+  deleteMessages: jest.fn(),
+  getMessage: jest.fn(),
   getFiles: jest.fn(),
 }));
 jest.mock('~/server/services/AuditTraceConversations/client', () => ({
   callConsoleConversationsProxy: jest.fn(),
 }));
 
+const { SovereignMemoryError } = require('~/server/services/AuditTraceMemory/errors');
+
+const NOT_FOUND = () => Promise.reject(new SovereignMemoryError('not found', 404));
+
 describe('Messages Routes — sovereign backend dispatch (MongoDB-elimination WU-2)', () => {
   let app;
-  const { getMessages, saveMessage, saveConvo } = require('~/models');
+  const {
+    getMessages,
+    saveMessage,
+    saveConvo,
+    updateMessage,
+    deleteMessages,
+  } = require('~/models');
   const {
     callConsoleConversationsProxy,
   } = require('~/server/services/AuditTraceConversations/client');
@@ -134,6 +157,32 @@ describe('Messages Routes — sovereign backend dispatch (MongoDB-elimination WU
       expect(saveConvo).toHaveBeenCalled();
       expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
     });
+
+    it('GET /:conversationId/:messageId calls the Mongo model, never the sovereign HTTP boundary', async () => {
+      getMessages.mockResolvedValueOnce([{ messageId: 'm1' }]);
+      await request(app).get('/api/messages/c1/m1').expect(200);
+      expect(getMessages).toHaveBeenCalled();
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+    });
+
+    it('PUT /:conversationId/:messageId calls the Mongo model, never the sovereign HTTP boundary', async () => {
+      getMessages.mockResolvedValueOnce([{ conversationId: 'c1', isCreatedByUser: true }]);
+      updateMessage.mockResolvedValueOnce({ messageId: 'm1' });
+      await request(app).put('/api/messages/c1/m1').send({ text: 'edited' }).expect(200);
+      expect(updateMessage).toHaveBeenCalled();
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+    });
+
+    it('DELETE /:conversationId/:messageId calls the Mongo model, never the sovereign HTTP boundary', async () => {
+      deleteMessages.mockResolvedValueOnce({ deletedCount: 1 });
+      await request(app).delete('/api/messages/c1/m1').expect(204);
+      expect(deleteMessages).toHaveBeenCalledWith({
+        messageId: 'm1',
+        conversationId: 'c1',
+        user: 'test-user-123',
+      });
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+    });
   });
 
   describe('sovereign flag', () => {
@@ -172,7 +221,8 @@ describe('Messages Routes — sovereign backend dispatch (MongoDB-elimination WU
           text: 'hi',
           is_created_by_user: true,
           created_at_ms: 0,
-        })
+        }) // saveMessage POST
+        .mockImplementationOnce(NOT_FOUND) // saveConvo existing-fetch GET (brand new)
         .mockResolvedValueOnce({
           conversation_id: 'c1',
           title: 't',
@@ -180,7 +230,7 @@ describe('Messages Routes — sovereign backend dispatch (MongoDB-elimination WU
           created_at_ms: 0,
           updated_at_ms: 0,
           metadata: {},
-        });
+        }); // saveConvo POST
       const res = await request(app)
         .post('/api/messages/c1')
         .send({ messageId: 'm1', text: 'hi', isCreatedByUser: true })
@@ -194,6 +244,71 @@ describe('Messages Routes — sovereign backend dispatch (MongoDB-elimination WU
       );
       expect(saveMessage).not.toHaveBeenCalled();
       expect(saveConvo).not.toHaveBeenCalled();
+    });
+
+    it('GET /:conversationId/:messageId routes to the sovereign adapter and NEVER calls the Mongo model', async () => {
+      callConsoleConversationsProxy.mockResolvedValueOnce({
+        items: [
+          {
+            message_id: 'm1',
+            conversation_id: 'c1',
+            sender: 'User',
+            text: 'hi',
+            is_created_by_user: true,
+            created_at_ms: 0,
+          },
+        ],
+      });
+      const res = await request(app).get('/api/messages/c1/m1').expect(200);
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0].messageId).toBe('m1');
+      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'GET', path: 'c1/messages' }),
+      );
+      expect(getMessages).not.toHaveBeenCalled();
+    });
+
+    it('PUT /:conversationId/:messageId routes the text edit to the sovereign adapter and NEVER calls the Mongo model', async () => {
+      callConsoleConversationsProxy
+        .mockResolvedValueOnce({
+          items: [
+            {
+              message_id: 'm1',
+              conversation_id: 'c1',
+              sender: 'User',
+              text: 'hi',
+              is_created_by_user: true,
+              created_at_ms: 0,
+            },
+          ],
+        }) // getMessages (fetch before edit)
+        .mockImplementationOnce(NOT_FOUND) // updateMessage existing-fetch GET
+        .mockResolvedValueOnce({
+          message_id: 'm1',
+          conversation_id: 'c1',
+          sender: 'User',
+          text: 'edited',
+          is_created_by_user: true,
+          created_at_ms: 0,
+        }); // updateMessage PATCH
+      const res = await request(app)
+        .put('/api/messages/c1/m1')
+        .send({ text: 'edited' })
+        .expect(200);
+      expect(res.body.text).toBe('edited');
+      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'PATCH', path: 'c1/messages/m1' }),
+      );
+      expect(updateMessage).not.toHaveBeenCalled();
+    });
+
+    it('DELETE /:conversationId/:messageId routes to the sovereign adapter and NEVER calls the Mongo model', async () => {
+      callConsoleConversationsProxy.mockResolvedValueOnce(undefined);
+      await request(app).delete('/api/messages/c1/m1').expect(204);
+      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'DELETE', path: 'c1/messages/m1' }),
+      );
+      expect(deleteMessages).not.toHaveBeenCalled();
     });
   });
 });

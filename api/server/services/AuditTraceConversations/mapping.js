@@ -20,6 +20,20 @@
  * agent-event-actor / subagent-thread / HITL surface on `IConversation`/
  * `IMessage` is OUT OF SCOPE for this WU entirely — not read, not
  * written, not round-tripped.
+ *
+ * **Metadata is a FULL REPLACE on the server, not a merge**
+ * (`services/console_conversations.py::upsert_conversation`/`edit_message`:
+ * `row.metadata_json = metadata` unconditionally whenever a metadata value
+ * is present — and `ConsoleConversationUpsertRequest.metadata` always
+ * deserializes to a dict, never `None`, so it is ALWAYS "present"). A
+ * caller that builds `metadata` from only the fields IT knows about (e.g.
+ * a title-only update) would silently WIPE `isArchived`/`pinned`/`tags`/
+ * `content` set by an earlier write — the exact silent-data-loss shape
+ * the reviewer flagged. `index.js`'s `saveConvo`/`updateMessage` avoid
+ * this by fetching the EXISTING row first and merging on top of it before
+ * ever building a body with these functions — this module only builds
+ * bodies from an ALREADY-merged `data`/`params` object; it never merges
+ * itself (kept pure/synchronous, no I/O).
  */
 
 /** @param {unknown} v @returns {boolean} */
@@ -127,18 +141,28 @@ function apiToConvo(item, userId) {
  * explicit, documented v1 simplification, same discipline as the class
  * docstring above).
  *
+ * `content` (the structured multi-part agent-response array) and
+ * `userSubmittedPaths` have no first-class WU-1 column — they round-trip
+ * through `metadata`, same discipline as `convoExtraMetadata` above.
+ *
  * @param {{messageId: string, conversationId: string, parentMessageId?: string|null,
  *   sender?: string, text?: string, isCreatedByUser?: boolean, model?: string,
- *   endpoint?: string, tokenCount?: number, error?: boolean|string}} params
+ *   endpoint?: string, tokenCount?: number, error?: boolean|string,
+ *   content?: unknown[], userSubmittedPaths?: string[]}} params
+ * @param {Record<string, unknown>} [extraMetadata] - ALREADY-merged metadata
+ *   (e.g. the existing row's metadata merged with this call's own
+ *   `messageExtraMetadata(params)`) to carry verbatim. Defaults to
+ *   `messageExtraMetadata(params)` alone (the shape a brand-new create
+ *   needs — there is no existing row to merge for a create).
  * @returns {Record<string, unknown>}
  */
-function messageUpsertBody(params) {
+function messageUpsertBody(params, extraMetadata) {
   const body = {
     message_id: params.messageId,
     sender: params.sender || (params.isCreatedByUser ? 'User' : 'AI'),
     text: params.text ?? '',
     is_created_by_user: Boolean(params.isCreatedByUser),
-    metadata: {},
+    metadata: extraMetadata !== undefined ? extraMetadata : messageExtraMetadata(params),
   };
   if (params.parentMessageId !== undefined && params.parentMessageId !== null) {
     body.parent_message_id = params.parentMessageId;
@@ -159,6 +183,35 @@ function messageUpsertBody(params) {
 }
 
 /**
+ * Builds the `metadata` bag for a message upsert/edit, carrying the
+ * fields WU-1's API has no first-class column for.
+ *
+ * `tokenCount` is shadowed into `metadata` in ADDITION to the top-level
+ * `token_count` column (`messageUpsertBody` sets that column too, for a
+ * CREATE): WU-1's `PATCH .../messages/{id}` (edit) has no `token_count`
+ * field at all, so an EDITED token count has no column to land in —
+ * `metadata.tokenCount` is the only place an edit can persist it.
+ * `apiToMessage` prefers `metadata.tokenCount` over the column when both
+ * are present (the more recent value).
+ *
+ * @param {{content?: unknown[], userSubmittedPaths?: string[], tokenCount?: number}} params
+ * @returns {Record<string, unknown>}
+ */
+function messageExtraMetadata(params) {
+  const out = {};
+  if (params.content !== undefined) {
+    out.content = params.content;
+  }
+  if (params.userSubmittedPaths !== undefined) {
+    out.userSubmittedPaths = params.userSubmittedPaths;
+  }
+  if (params.tokenCount !== undefined) {
+    out.tokenCount = params.tokenCount;
+  }
+  return out;
+}
+
+/**
  * Maps a `ConsoleMessageItem` response row back onto the LibreChat-shaped
  * message object callers expect from `getMessage`/`getMessages`/
  * `saveMessage`/`updateMessage`.
@@ -168,7 +221,8 @@ function messageUpsertBody(params) {
  * @returns {Record<string, unknown>}
  */
 function apiToMessage(item, userId) {
-  return {
+  const metadata = isPlainObject(item.metadata) ? item.metadata : {};
+  const message = {
     messageId: item.message_id,
     conversationId: item.conversation_id,
     parentMessageId: item.parent_message_id ?? null,
@@ -177,16 +231,28 @@ function apiToMessage(item, userId) {
     isCreatedByUser: Boolean(item.is_created_by_user),
     model: item.model ?? undefined,
     endpoint: item.endpoint ?? undefined,
-    tokenCount: item.token_count ?? undefined,
+    // `metadata.tokenCount` (set by an EDIT — see `messageExtraMetadata`)
+    // is more recent than the `token_count` column (set at CREATE only).
+    tokenCount: metadata.tokenCount ?? item.token_count ?? undefined,
     error: Boolean(item.error),
     user: userId,
     createdAt: new Date(item.created_at_ms).toISOString(),
   };
+  if (metadata.content !== undefined) {
+    message.content = metadata.content;
+  }
+  if (metadata.userSubmittedPaths !== undefined) {
+    message.userSubmittedPaths = metadata.userSubmittedPaths;
+  }
+  return message;
 }
 
 module.exports = {
+  isPlainObject,
+  convoExtraMetadata,
   convoUpsertBody,
   apiToConvo,
+  messageExtraMetadata,
   messageUpsertBody,
   apiToMessage,
 };
