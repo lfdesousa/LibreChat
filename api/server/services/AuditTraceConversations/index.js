@@ -1,21 +1,36 @@
 /**
- * The sovereign-conversations adapter (MongoDB-elimination EPIC, WU-2) —
- * the `~/models` conversation/message methods
- * (`packages/data-schemas/src/methods/{conversation,message}.ts`) LibreChat
- * calls for the console's persistence, backed by HTTP calls to the BFF
+ * The sovereign-conversations adapter (MongoDB-elimination EPIC, WU-2b —
+ * the MODEL-LAYER CHOKEPOINT pivot, 2026-09-11, RATIFIED after three
+ * route-level-wiring REJECTs) — the `~/models` conversation/message
+ * methods (`packages/data-schemas/src/methods/{conversation,message}.ts`)
+ * LibreChat calls for persistence, backed by HTTP calls to the BFF
  * `/console/conversations/*` proxy (WU-1) instead of Mongo, gated behind
  * `AUDITTRACE_MEMORY_BACKEND=sovereign` (`../AuditTraceMemory/config`).
  *
- * Mirrors `AuditTraceMemory/index.js`'s structure and discipline
- * deliberately: **token threading is explicit, not ambient.** Every raw
- * function here takes a trailing `token` argument; `resolveConversationMethods`
- * (below) is the ONE seam a call site uses to bind that token from
- * `req.session.openidTokens.accessToken` once and get back an object whose
- * methods have the EXACT SAME call signature as the Mongo model functions
- * they replace — the same "explicit-threading, resolver-bound" pattern
- * `AuditTraceMemory/agentMethods.js::resolveMemoryWriteMethods` already
- * established for the agent memory-write seam. There is no
- * AsyncLocalStorage, no module-level "current user".
+ * **The pivot, in one sentence:** route-level wiring
+ * (`resolveConversationMethods({req, mongoMethods})`, called at each
+ * conversation/message call site) could never be proven COMPLETE, because
+ * `~/models` is consumed in more shapes than name-based grep can
+ * enumerate — a plain route call, `utils/import/fork.js`'s
+ * `const db = require('~/models')`, AND `services/Schedules/index.js`
+ * threading the SAME object in as an injected `methods` constructor
+ * param. Each round's exhaustive audit found another caller. `
+ * wrapModelMethods()` (below) is called EXACTLY ONCE, wrapping the
+ * `createMethods(...)` output before `api/models/index.js` exports it —
+ * every caller, whatever shape it consumes `~/models` in, gets the SAME
+ * wrapped function references, so sovereign-vs-Mongo dispatch is
+ * STRUCTURALLY complete (true by construction) rather than
+ * enumeration-dependent (true only until the next un-grepped caller).
+ *
+ * **Token threading is per-call, via `./requestContext`'s
+ * `AsyncLocalStorage`, not a parameter.** Model-layer methods receive no
+ * `req` — there is no shape a caller could pass one through even if this
+ * WU wanted them to. `wrapModelMethods`'s wrapper reads
+ * `getRequestAccessToken()` at CALL TIME for every invocation, so the
+ * SAME wrapped `saveConvo` reference correctly serves a sovereign-flagged
+ * request with a token, a sovereign-flagged background job with NO token
+ * (falls to Mongo — the disclosed boundary), and a Mongo-default request,
+ * all without the caller doing anything differently.
  *
  * **Fail-closed, always.** A non-2xx from `callConsoleConversationsProxy`
  * (`SovereignMemoryError`) propagates to the caller unchanged — no method
@@ -26,31 +41,28 @@
  * `getConvo`/`getMessages` already have for a no-match query, not a
  * fail-open shortcut (no write path does this).
  *
- * **Metadata-clobber guard (2026-09-11 remediation).** WU-1's upsert/edit
- * endpoints REPLACE `metadata` wholesale, never merge it server-side (see
- * `mapping.js`'s module docstring). A partial write built from only the
- * fields the CALLER happens to know about would silently erase everything
- * else previously stored there (`isArchived`/`pinned`/`tags` on a
- * conversation; `content`/`userSubmittedPaths`/`tokenCount` on a message)
- * — exactly the silent-data-loss shape this WU exists to prevent.
- * `saveConvo`/`updateMessage` both fetch the EXISTING row first and merge
- * the caller's delta on top of it before building the request body; every
- * other write (`saveMessage` on CREATE, `setConvoPinned` via `saveConvo`)
- * either has no prior row to lose or routes through the same merge.
+ * **Metadata-clobber guard (carried over from the route-level rounds).**
+ * WU-1's upsert/edit endpoints REPLACE `metadata` wholesale, never merge
+ * it server-side (see `mapping.js`'s module docstring). `saveConvo`/
+ * `updateMessage` both fetch the EXISTING row first and merge the
+ * caller's delta on top of it before building the request body.
  *
- * **Method coverage (2026-09-11 remediation — closes the reviewer's Rule-1
- * gap).** Beyond the 9 methods the ratified spec named, this module also
- * shims `getConvoOwnership` (an existence+ownership projection — aliased
- * to `getConvo`, whose fuller row is a strict superset of what callers
- * read from it), `setConvoPinned` (a `saveConvo` convenience matching
- * Mongo's own method), and `getMessagesByCursor` (client-side
- * sort/paginate over `getMessages`, since WU-1's message-tree endpoint has
- * no native pagination) — all discovered necessary while wiring the
- * remaining isolated, `req`-scoped `routes/convos.js`/`routes/messages.js`
- * call sites the first review round left on Mongo. See the module's
- * `SOVEREIGN_METHOD_BINDERS` map for the definitive shimmed-method list,
- * and the build record for the residual, explicitly-disclosed unwired
- * surface (full-text message search; the agent-generation write path).
+ * **Method coverage.** `SOVEREIGN_METHOD_BINDERS` names every chokepointed
+ * method: the 9 the original spec named, plus `getConvoOwnership` (aliased
+ * to `getConvo`), `setConvoPinned`, `getMessagesByCursor` (client-side
+ * sort/paginate — WU-1's message-tree endpoint has no native pagination),
+ * and `bulkSaveConvos`/`bulkSaveMessages` (fan out to individual
+ * `saveConvo`/`saveMessage` calls — WU-1 has no bulk endpoint).
+ * `forkConversation`/`duplicateConversation`/`forkSharedConversation`
+ * (`utils/import/fork.js`) and `ImportBatchBuilder.saveBatch`
+ * (`utils/import/importBatchBuilder.js`) are NOT `~/models` exports
+ * themselves and need NO wrapping of their own — they call `getConvo`/
+ * `getMessages`/`bulkSaveConvos`/`bulkSaveMessages` from `~/models`
+ * directly, so they inherit chokepoint routing automatically. See the
+ * build record for the residual, explicitly-disclosed boundary (the
+ * generation/chat pipeline as its own tracked follow-up; the one honest
+ * no-live-token background-writes category this chokepoint cannot and
+ * must not fake its way around).
  */
 
 const { callConsoleConversationsProxy } = require('./client');
@@ -65,6 +77,7 @@ const {
 } = require('./mapping');
 const { SovereignMemoryError } = require('../AuditTraceMemory/errors');
 const { isSovereignBackend } = require('../AuditTraceMemory/config');
+const { getRequestAccessToken } = require('./requestContext');
 
 const COLLECT_ALL_PAGE_SIZE = 100;
 const DEFAULT_MESSAGES_BY_CURSOR_LIMIT = 25;
@@ -720,41 +733,70 @@ const SOVEREIGN_METHOD_BINDERS = {
 };
 
 /**
- * Selects the conversation/message methods object a call site should use:
- * a sovereign bridge (token bound at construction from
- * `req.session.openidTokens.accessToken`) when
- * `AUDITTRACE_MEMORY_BACKEND=sovereign` is active, or `mongoMethods`
- * COMPLETELY UNCHANGED (same object reference) otherwise — the SAME
- * "explicit resolver seam" pattern
- * `AuditTraceMemory/agentMethods.js::resolveMemoryWriteMethods` already
- * established.
+ * THE CHOKEPOINT (MongoDB-elimination WU-2b — the model-layer pivot,
+ * 2026-09-11, RATIFIED after three route-level-wiring REJECTs). Wraps
+ * EVERY method in `mongoMethods` that has a `SOVEREIGN_METHOD_BINDERS`
+ * entry with a function that decides, AT CALL TIME (not at wrap time),
+ * which backend serves THIS call:
  *
- * `mongoMethods` may be a PARTIAL object naming only the methods a given
- * call site actually uses (e.g. `{ getConvo: db.getConvo }` in a route
- * that only reads one conversation) — only those same keys are bound on
- * the sovereign side, so an unrelated method never spuriously appears (or
- * disappears) on the returned object. A key with no entry in
- * `SOVEREIGN_METHOD_BINDERS` (out of this WU's scope) is passed through
- * as the caller's own Mongo function, unchanged, even under sovereign.
+ *   `isSovereignBackend()` AND a live request access token
+ *   (`getRequestAccessToken()`, from `./requestContext`) → the sovereign
+ *   adapter, fail-closed; else → the raw Mongo function, UNCHANGED.
  *
- * @param {{req: {session?: {openidTokens?: {accessToken?: string}}}, mongoMethods: Record<string, Function>}} params
- * @returns {Record<string, Function>} `mongoMethods` (same reference)
- *   under the default `mongo` flag; a sovereign-bound object (same key
- *   set) otherwise.
+ * This is called EXACTLY ONCE, in `api/models/index.js`, wrapping the
+ * FULL `createMethods(...)` output before it is exported. Because every
+ * caller in the fork — routes, controllers, `utils/import/fork.js`
+ * (`const db = require('~/models')`), `services/Schedules/index.js`
+ * (`createSchedulesService({ methods: require('~/models'), ... })`), and
+ * any future caller — obtains these same wrapped function references
+ * (there is no OTHER path to `saveConvo`/`getMessages`/etc.), sovereign
+ * routing is now STRUCTURALLY complete: no request-scoped caller can
+ * bypass it, by construction, not by enumeration. This is what closed
+ * the completeness gap three rounds of route-level wiring could not
+ * (each round's exhaustive grep found another caller — fork/duplicate/
+ * import, then `services/Schedules/index.js` threading `~/models` as an
+ * injected `methods` param — because NAME-BASED enumeration of call
+ * sites can always miss one; wrapping the single EXPORT point cannot).
+ *
+ * **The one honest, disclosed boundary:** a scheduled/triggered
+ * conversation write that fires with NO live HTTP request (a genuine
+ * cron-style background execution, as opposed to a "run now" fired
+ * synchronously within a user's request) has no `getRequestAccessToken()`
+ * value to read — `undefined` — so it falls to Mongo, `isSovereignBackend()`
+ * or not. This is intentional and documented, not a gap this WU could
+ * close without inventing a service-delegation/service-token mechanism
+ * (explicitly out of scope — see the ratified spec's "Out of scope").
+ * `AuditTraceConversations`/the chokepoint NEVER fabricates a token to
+ * force a background write through.
+ *
+ * A `mongoMethods` key with no `SOVEREIGN_METHOD_BINDERS` entry (every
+ * OTHER `~/models` export — users, presets, roles, files, agent-event
+ * actors, subagent threads, …) is returned unchanged; this function only
+ * ever touches the named conversation/message methods.
+ *
+ * @param {Record<string, Function>} mongoMethods - the FULL `createMethods(...)`
+ *   output (or any object containing some of the same-named methods).
+ * @returns {Record<string, Function>} a new object, same keys as
+ *   `mongoMethods`, with the chokepointed names replaced by
+ *   call-time-dispatching wrappers.
  */
-function resolveConversationMethods({ req, mongoMethods }) {
-  if (!isSovereignBackend()) {
-    return mongoMethods;
-  }
-  const token =
-    (req && req.session && req.session.openidTokens && req.session.openidTokens.accessToken) ||
-    null;
-  const bound = {};
-  for (const name of Object.keys(mongoMethods || {})) {
+function wrapModelMethods(mongoMethods) {
+  const wrapped = { ...mongoMethods };
+  for (const name of Object.keys(SOVEREIGN_METHOD_BINDERS)) {
+    const mongoFn = mongoMethods[name];
+    if (typeof mongoFn !== 'function') {
+      continue;
+    }
     const binder = SOVEREIGN_METHOD_BINDERS[name];
-    bound[name] = binder ? binder(token) : mongoMethods[name];
+    wrapped[name] = (...args) => {
+      const token = isSovereignBackend() ? getRequestAccessToken() : undefined;
+      if (token) {
+        return binder(token)(...args);
+      }
+      return mongoFn(...args);
+    };
   }
-  return bound;
+  return wrapped;
 }
 
 module.exports = {
@@ -771,7 +813,7 @@ module.exports = {
   deleteMessages,
   bulkSaveConvos,
   bulkSaveMessages,
-  resolveConversationMethods,
+  wrapModelMethods,
   // Exported for direct unit testing, not part of the MethodsShaped surface.
   _internal: { extractIdList, collectAllConversationIds, fetchRawMessageItem, convoExtraMetadata },
 };

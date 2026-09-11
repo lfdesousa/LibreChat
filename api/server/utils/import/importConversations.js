@@ -8,16 +8,10 @@ const maxFileSize = resolveImportMaxFileSize();
 
 /**
  * Job definition for importing a conversation.
- * @param {{ filepath: string, requestUserId: string, userRole?: string, interfaceConfig?: object, filters?: object, legacyPii?: object, conversationDb?: {bulkSaveConvos: Function, bulkSaveMessages: Function} }} job
- *   `conversationDb` — MongoDB-elimination WU-2 remediation:
- *   `routes/convos.js`'s `POST /import`'s already-
- *   `resolveConversationMethods`-resolved bulk-save functions. Threaded
- *   through to `createImportBatchBuilder`; omitted (`undefined`) falls
- *   back to the raw Mongo functions unchanged.
+ * @param {{ filepath: string, requestUserId: string, userRole?: string, interfaceConfig?: object, filters?: object, legacyPii?: object }} job
  */
 const importConversations = async (job) => {
-  const { filepath, requestUserId, userRole, interfaceConfig, filters, legacyPii, conversationDb } =
-    job;
+  const { filepath, requestUserId, userRole, interfaceConfig, filters, legacyPii } = job;
   try {
     logger.debug(`user: ${requestUserId} | Importing conversation(s) from file...`);
 
@@ -35,7 +29,9 @@ const importConversations = async (job) => {
       jsonData,
       requestUserId,
       (userId) =>
-        createImportBatchBuilder(userId, interfaceConfig, filters, legacyPii, conversationDb),
+        legacyPii == null
+          ? createImportBatchBuilder(userId, interfaceConfig, filters)
+          : createImportBatchBuilder(userId, interfaceConfig, filters, legacyPii),
       userRole,
     );
     logger.debug(`user: ${requestUserId} | Finished importing conversations`);

@@ -142,15 +142,7 @@ jest.mock('~/cache', () => ({
   getLogStores: jest.fn(),
 }));
 
-jest.mock('~/server/services/AuditTraceConversations/client', () => ({
-  callConsoleConversationsProxy: jest.fn(),
-}));
-
 const { deleteUserController } = require('~/server/controllers/UserController');
-const {
-  callConsoleConversationsProxy,
-} = require('~/server/services/AuditTraceConversations/client');
-const { SovereignMemoryError } = require('~/server/services/AuditTraceMemory/errors');
 
 function createRes() {
   const res = {};
@@ -377,66 +369,5 @@ describe('deleteUserController - 2FA enforcement', () => {
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.send).toHaveBeenCalledWith({ message: 'User deleted' });
     expect(mockDeleteMessages).toHaveBeenCalled();
-  });
-});
-
-describe('deleteUserController - sovereign backend dispatch (MongoDB-elimination WU-2 remediation)', () => {
-  const ORIGINAL_BACKEND = process.env.AUDITTRACE_MEMORY_BACKEND;
-
-  afterEach(() => {
-    if (ORIGINAL_BACKEND === undefined) {
-      delete process.env.AUDITTRACE_MEMORY_BACKEND;
-    } else {
-      process.env.AUDITTRACE_MEMORY_BACKEND = ORIGINAL_BACKEND;
-    }
-  });
-
-  /**
-   * A deleted account must not leave sovereign-only conversations/messages
-   * behind (a real erasure-completeness gap the reviewer's "ALL req-scoped
-   * user-facing convo/message persistence" directive covers). NON-VACUOUS:
-   * verified by hand that hardcoding `resolveConversationMethods` to always
-   * `return mongoMethods` turns this RED (the sovereign HTTP boundary is
-   * never hit, `mockDeleteMessages`/`mockDeleteConvos` ARE called instead);
-   * restored, green.
-   */
-  it('under sovereign, routes deleteMessages/deleteConvos to the sovereign adapter and NEVER calls the Mongo model', async () => {
-    process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
-    const req = {
-      user: { id: 'user1', _id: 'user1', email: 'a@b.com' },
-      body: {},
-      session: { openidTokens: { accessToken: 'user-bearer-token' } },
-    };
-    const res = createRes();
-    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
-    callConsoleConversationsProxy.mockImplementation(async ({ method }) =>
-      method === 'GET' ? { items: [], next_cursor: null } : undefined,
-    );
-
-    await deleteUserController(req, res);
-
-    expect(res.status).toHaveBeenCalledWith(200);
-    expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
-      expect.objectContaining({ token: 'user-bearer-token' }),
-    );
-    expect(mockDeleteMessages).not.toHaveBeenCalled();
-    expect(mockDeleteConvos).not.toHaveBeenCalled();
-  });
-
-  it('under sovereign with a real failure, fails the whole deletion rather than silently succeeding', async () => {
-    process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
-    const req = {
-      user: { id: 'user1', _id: 'user1', email: 'a@b.com' },
-      body: {},
-      session: { openidTokens: { accessToken: 'user-bearer-token' } },
-    };
-    const res = createRes();
-    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
-    callConsoleConversationsProxy.mockRejectedValue(new SovereignMemoryError('boom', 500));
-
-    await deleteUserController(req, res);
-
-    expect(res.status).toHaveBeenCalledWith(500);
-    expect(mockDeleteMessages).not.toHaveBeenCalled();
   });
 });

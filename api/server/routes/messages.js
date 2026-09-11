@@ -36,7 +36,6 @@ const {
   canReadActiveJobConversation,
   prepareMessageRequestValidation,
 } = require('~/server/middleware');
-const { resolveConversationMethods } = require('~/server/services/AuditTraceConversations');
 const db = require('~/models');
 
 const router = express.Router();
@@ -60,14 +59,6 @@ const storedMessageMutationMiddleware = [
 
 router.use(requireJwtAuth);
 
-// DISCLOSED GAP (MongoDB-elimination WU-2 remediation, 2026-09-11):
-// `getConvo: db.getConvo` here is intentionally NOT routed through
-// `resolveConversationMethods` — subagent threads (the feature this guard
-// protects) are entirely out of scope for this WU and do not exist in the
-// sovereign store at all. Under sovereign, this Mongo lookup finds nothing
-// for a sovereign-only conversation, so `isSubagentThreadWriteBlocked`
-// always resolves "not blocked" — benign, not a data-consistency risk,
-// since there is no subagent-thread state under sovereign to protect.
 async function rejectSubagentThreadWrite(req, res, conversationId) {
   const blocked = await isSubagentThreadWriteBlocked(
     { getConvo: db.getConvo, store: subagentThreadTaskStore },
@@ -106,27 +97,12 @@ router.get('/', async (req, res) => {
       : 'createdAt';
     const sortOrder = sortDirection === 'asc' ? 1 : -1;
 
-    // Console conversation-scoped message read (MongoDB-elimination WU-2
-    // remediation) — under sovereign, routes to `/console/conversations`
-    // instead of Mongo. The `search` branch below (MeiliSearch full-text)
-    // has NO sovereign equivalent and stays on Mongo regardless of the
-    // flag — see the module docstring / build record for the disclosed
-    // consequence.
-    const { getConvoOwnership, getMessages, getMessagesByCursor } = resolveConversationMethods({
-      req,
-      mongoMethods: {
-        getConvoOwnership: db.getConvoOwnership,
-        getMessages: db.getMessages,
-        getMessagesByCursor: db.getMessagesByCursor,
-      },
-    });
-
     let scopedMessageRead;
     if (typeof conversationId === 'string') {
-      const ownershipRead = getConvoOwnership(user, conversationId);
+      const ownershipRead = db.getConvoOwnership(user, conversationId);
       const messageRead = messageId
-        ? getMessages({ conversationId, messageId, user })
-        : getMessagesByCursor(
+        ? db.getMessages({ conversationId, messageId, user })
+        : db.getMessagesByCursor(
             { conversationId, user },
             { sortField, sortOrder, limit: pageSize, cursor },
           );
@@ -161,14 +137,6 @@ router.get('/', async (req, res) => {
       }
       response = messageResult.value;
     } else if (search) {
-      // DISCLOSED GAP (MongoDB-elimination WU-2 remediation, 2026-09-11):
-      // full-text message search is MeiliSearch-backed and stays on Mongo
-      // regardless of `AUDITTRACE_MEMORY_BACKEND` — WU-1's
-      // `/console/conversations` API has no search endpoint at all (a
-      // genuine backend capability gap, not a wiring gap this fork can
-      // close). Consequence: a message that exists ONLY in the sovereign
-      // store will not appear in these search results until a future WU
-      // adds a search surface to the AuditTrace-side API.
       const searchResults = await db.searchMessages(search, { filter: `user = "${user}"` }, true);
 
       const messages = searchResults.hits || [];
@@ -242,17 +210,7 @@ router.post('/branch', configMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'messageId and agentId are required' });
     }
 
-    // Console branch-source read (MongoDB-elimination WU-2 remediation) —
-    // see the `GET /` route above for the same seam. `getMessage` has no
-    // `conversationId` to start from here (that is what this lookup is
-    // FOR), so under sovereign it scans the caller's own conversations
-    // (`AuditTraceConversations/index.js::getMessage`'s documented
-    // Mongo-global-lookup fallback).
-    const { getMessage, saveMessage } = resolveConversationMethods({
-      req,
-      mongoMethods: { getMessage: db.getMessage, saveMessage: db.saveMessage },
-    });
-    const sourceMessage = await getMessage({ user: userId, messageId });
+    const sourceMessage = await db.getMessage({ user: userId, messageId });
     if (!sourceMessage) {
       return res.status(404).json({ error: 'Source message not found' });
     }
@@ -359,7 +317,7 @@ router.post('/branch', configMiddleware, async (req, res) => {
       { getFiles: db.getFiles },
     );
 
-    const savedMessage = await saveMessage(
+    const savedMessage = await db.saveMessage(
       {
         userId: req?.user?.id,
         isTemporary: req?.body?.isTemporary,
@@ -394,14 +352,7 @@ router.post('/artifact/:messageId', configMiddleware, async (req, res) => {
 
     assertStoredMessageMutationAllowed(req.config?.filters, { original, updated });
 
-    // Console artifact-edit read+write (MongoDB-elimination WU-2
-    // remediation) — see `POST /branch` above for the same `getMessage`
-    // Mongo-global-lookup fallback.
-    const { getMessage, saveMessage } = resolveConversationMethods({
-      req,
-      mongoMethods: { getMessage: db.getMessage, saveMessage: db.saveMessage },
-    });
-    const message = await getMessage({ user: req.user.id, messageId });
+    const message = await db.getMessage({ user: req.user.id, messageId });
     if (!message) {
       return res.status(404).json({ error: 'Message not found' });
     }
@@ -456,7 +407,7 @@ router.post('/artifact/:messageId', configMiddleware, async (req, res) => {
         : { text: updatedText };
     assertStoredMessageMutationAllowed(req.config?.filters, filteredArtifact);
 
-    const savedMessage = await saveMessage(
+    const savedMessage = await db.saveMessage(
       {
         userId: req?.user?.id,
         isTemporary: req?.body?.isTemporary,
@@ -496,20 +447,10 @@ router.get('/:conversationId', prepareMessageRequestValidation, async (req, res)
   try {
     const { conversationId } = req.params;
     const validation = req.messageRequestValidation;
-    // Console message-TREE read (MongoDB-elimination WU-2): under
-    // `AUDITTRACE_MEMORY_BACKEND=sovereign` this is served from
-    // `/console/conversations/{id}/messages` instead of Mongo — see
-    // `AuditTraceConversations/index.js`'s module docstring. Byte-identical
-    // to the Mongo call under the default flag (`resolveConversationMethods`
-    // returns `db` unchanged in that case).
-    const { getMessages } = resolveConversationMethods({
-      req,
-      mongoMethods: { getMessages: db.getMessages },
-    });
     // This intentionally starts a user-scoped read before validation resolves;
     // the response remains gated on validation success below.
     const messagesPromise = validation.shouldFetchMessages
-      ? getMessages({ conversationId, user: req.user.id }, CLIENT_MESSAGE_SELECT).then(
+      ? db.getMessages({ conversationId, user: req.user.id }, CLIENT_MESSAGE_SELECT).then(
           (messages) => ({ messages }),
           (error) => ({ error }),
         )
@@ -547,15 +488,7 @@ router.post('/:conversationId', storedMessageMutationMiddleware, async (req, res
       isTemporary: req?.body?.isTemporary,
       interfaceConfig: req?.config?.interfaceConfig,
     };
-    // Console message + conversation WRITE (MongoDB-elimination WU-2): under
-    // `AUDITTRACE_MEMORY_BACKEND=sovereign` these route to
-    // `/console/conversations` instead of Mongo. Byte-identical to the
-    // Mongo calls under the default flag.
-    const { saveMessage, saveConvo } = resolveConversationMethods({
-      req,
-      mongoMethods: { saveMessage: db.saveMessage, saveConvo: db.saveConvo },
-    });
-    const savedMessage = await saveMessage(
+    const savedMessage = await db.saveMessage(
       reqCtx,
       { ...message, user: req.user.id, isUserSubmitted: true },
       { context: 'POST /api/messages/:conversationId' },
@@ -569,7 +502,7 @@ router.post('/:conversationId', storedMessageMutationMiddleware, async (req, res
       ...(message.model !== undefined && { model: savedMessage.model }),
       ...(message.iconURL !== undefined && { iconURL: savedMessage.iconURL }),
     };
-    await saveConvo(reqCtx, conversationUpdate, {
+    await db.saveConvo(reqCtx, conversationUpdate, {
       context: 'POST /api/messages/:conversationId',
       ...(savedMessage._id != null ? { appendMessageIds: [savedMessage._id] } : {}),
     });
@@ -583,13 +516,7 @@ router.post('/:conversationId', storedMessageMutationMiddleware, async (req, res
 router.get('/:conversationId/:messageId', validateMessageReq, async (req, res) => {
   try {
     const { conversationId, messageId } = req.params;
-    // Console single-message read (MongoDB-elimination WU-2 remediation) —
-    // see the `GET /` route above for the same seam.
-    const { getMessages } = resolveConversationMethods({
-      req,
-      mongoMethods: { getMessages: db.getMessages },
-    });
-    const message = await getMessages(
+    const message = await db.getMessages(
       { conversationId, messageId, user: req.user.id },
       CLIENT_MESSAGE_SELECT,
     );
@@ -606,19 +533,9 @@ router.get('/:conversationId/:messageId', validateMessageReq, async (req, res) =
 router.put('/:conversationId/:messageId', messageMutationMiddleware, async (req, res) => {
   try {
     const { conversationId, messageId } = req.params;
-    // Console message edit (MongoDB-elimination WU-2 remediation) — see
-    // the `GET /` route above for the same seam. `conversationId` is
-    // added to the filter here (harmless under Mongo — it only narrows an
-    // already messageId-unique query further) because the sovereign
-    // adapter's `getMessages` requires it (WU-1 addresses a message only
-    // within its conversation).
-    const { getMessages, updateMessage } = resolveConversationMethods({
-      req,
-      mongoMethods: { getMessages: db.getMessages, updateMessage: db.updateMessage },
-    });
     const message = (
-      await getMessages(
-        { conversationId, messageId, user: req.user.id },
+      await db.getMessages(
+        { messageId, user: req.user.id },
         'conversationId content tokenCount quotes isCreatedByUser userSubmittedPaths',
       )
     )?.[0];
@@ -651,8 +568,7 @@ router.put('/:conversationId/:messageId', messageMutationMiddleware, async (req,
         quotes: message.isCreatedByUser === true ? message.quotes : undefined,
       });
       const tokenCount = await countTokens(textToCount, model);
-      const result = await updateMessage(req?.user?.id, {
-        conversationId,
+      const result = await db.updateMessage(req?.user?.id, {
         messageId,
         text,
         tokenCount,
@@ -706,8 +622,7 @@ router.put('/:conversationId/:messageId', messageMutationMiddleware, async (req,
       tokenCount = Math.max(0, tokenCount - oldTokenCount) + newTokenCount;
     }
 
-    const result = await updateMessage(req?.user?.id, {
-      conversationId,
+    const result = await db.updateMessage(req?.user?.id, {
       messageId,
       content: updatedContent,
       tokenCount,
@@ -792,13 +707,7 @@ router.delete('/:conversationId/:messageId', validateMessageReq, async (req, res
     if (await rejectSubagentThreadWrite(req, res, conversationId)) {
       return;
     }
-    // Console single-message delete (MongoDB-elimination WU-2 remediation)
-    // — see the `GET /` route above for the same seam.
-    const { deleteMessages } = resolveConversationMethods({
-      req,
-      mongoMethods: { deleteMessages: db.deleteMessages },
-    });
-    await deleteMessages({ messageId, conversationId, user: req.user.id });
+    await db.deleteMessages({ messageId, conversationId, user: req.user.id });
     res.status(204).send();
   } catch (error) {
     logger.error('Error deleting message:', error);

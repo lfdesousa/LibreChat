@@ -39,9 +39,11 @@ const { forkConversation, duplicateConversation } = require('~/server/utils/impo
 const { storage, importFileFilter } = require('~/server/routes/files/multer');
 const requireJwtAuth = require('~/server/middleware/requireJwtAuth');
 const { importConversations } = require('~/server/utils/import');
+const {
+  restoreRequestAccessTokenContext,
+} = require('~/server/services/AuditTraceConversations/requestContext');
 const subagentThreadTaskStore = require('~/server/services/Endpoints/agents/subagentThreadStore');
 const getLogStores = require('~/cache/getLogStores');
-const { resolveConversationMethods } = require('~/server/services/AuditTraceConversations');
 const db = require('~/models');
 
 const assistantClients = {
@@ -164,16 +166,7 @@ router.get('/', async (req, res) => {
   }
 
   try {
-    // Console sidebar list (MongoDB-elimination WU-2): under
-    // `AUDITTRACE_MEMORY_BACKEND=sovereign` this renders from
-    // `/console/conversations` instead of Mongo — see
-    // `AuditTraceConversations/index.js`'s module docstring. Byte-identical
-    // to the Mongo call under the default flag.
-    const { getConvosByCursor } = resolveConversationMethods({
-      req,
-      mongoMethods: { getConvosByCursor: db.getConvosByCursor },
-    });
-    const result = await getConvosByCursor(req.user.id, {
+    const result = await db.getConvosByCursor(req.user.id, {
       cursor,
       limit,
       isArchived,
@@ -209,13 +202,7 @@ router.get('/:parentConversationId/subagents/:threadId', subagentThreadViewHandl
 
 router.get('/:conversationId', async (req, res) => {
   const { conversationId } = req.params;
-  // Console single-conversation read (MongoDB-elimination WU-2) — see the
-  // `GET /` list route above for the same seam.
-  const { getConvo } = resolveConversationMethods({
-    req,
-    mongoMethods: { getConvo: db.getConvo },
-  });
-  const convo = await getConvo(req.user.id, conversationId);
+  const convo = await db.getConvo(req.user.id, conversationId);
 
   if (convo && convo.subagentThread == null) {
     res.status(200).json(convo);
@@ -356,19 +343,8 @@ async function confirmAgentGenerationsDrained(userId, conversationIds, leaseTask
 }
 
 /** Stops event-bound child generations on their owning replica and then removes
- * persistence that raced the first conversation cascade.
- *
- * `conversationDb` is the caller's already-`resolveConversationMethods`-resolved
- * `{deleteConvos, deleteMessages}` (MongoDB-elimination WU-2 remediation) —
- * this helper has no `req` of its own, so the route handler resolves once
- * and threads the result through, the same seam every other wired call
- * site in this file uses. */
-async function drainDeletedAgentGenerations(
-  userId,
-  conversationIds,
-  conversationDb,
-  leaseTaskIds = [],
-) {
+ * persistence that raced the first conversation cascade. */
+async function drainDeletedAgentGenerations(userId, conversationIds, leaseTaskIds = []) {
   const foundActiveGeneration = await confirmAgentGenerationsDrained(
     userId,
     conversationIds,
@@ -378,11 +354,11 @@ async function drainDeletedAgentGenerations(
     return;
   }
   try {
-    await conversationDb.deleteConvos(userId, { conversationId: { $in: conversationIds } });
+    await db.deleteConvos(userId, { conversationId: { $in: conversationIds } });
   } catch {
     // Expected when no generation raced the first cascade.
   }
-  await conversationDb
+  await db
     .deleteMessages({ user: userId, conversationId: { $in: conversationIds } })
     .catch((error) => logger.warn('Deleted child message remnant cleanup failed', error));
 }
@@ -423,14 +399,6 @@ router.delete('/', configMiddleware, async (req, res) => {
       typeof req.user.tenantId === 'string' && req.user.tenantId !== ''
         ? req.user.tenantId
         : undefined;
-    // Console delete WRITE (MongoDB-elimination WU-2 remediation) — see the
-    // `GET /` list route above for the same seam. `conversationDb` is
-    // threaded into `drainDeletedAgentGenerations` below (a module-level
-    // helper with no `req` of its own) rather than resolved twice.
-    const conversationDb = resolveConversationMethods({
-      req,
-      mongoMethods: { deleteConvos: db.deleteConvos, deleteMessages: db.deleteMessages },
-    });
     let cancellationPlan;
     let dbResponse;
     if (filter.conversationId) {
@@ -442,7 +410,7 @@ router.delete('/', configMiddleware, async (req, res) => {
         tenantId,
       );
       await subagentThreadTaskStore.cancelPlan(cancellationPlan);
-      dbResponse = await conversationDb.deleteConvos(req.user.id, filter, {
+      dbResponse = await db.deleteConvos(req.user.id, filter, {
         beforeDelete: (conversationIds) =>
           confirmAgentGenerationsDrained(req.user.id, conversationIds),
       });
@@ -450,7 +418,7 @@ router.delete('/', configMiddleware, async (req, res) => {
       /** An empty filter deletes every conversation this owner has, so it runs behind
        * the same admission fence as `DELETE /all` rather than a bare drain. */
       dbResponse = await subagentThreadTaskStore.withOwnerDeletionFence(req.user.id, tenantId, () =>
-        conversationDb.deleteConvos(req.user.id, filter, {
+        db.deleteConvos(req.user.id, filter, {
           beforeDelete: (conversationIds) =>
             confirmAgentGenerationsDrained(req.user.id, conversationIds),
         }),
@@ -469,7 +437,6 @@ router.delete('/', configMiddleware, async (req, res) => {
       await drainDeletedAgentGenerations(
         req.user.id,
         deletedConversationIds,
-        conversationDb,
         cancellationPlan.leases
           .filter(
             (lease) =>
@@ -483,7 +450,7 @@ router.delete('/', configMiddleware, async (req, res) => {
        * requires_action event actor has intentionally released its lease. Its durable
        * generation is still addressable by the deleted conversation id and must be
        * terminalized before its checkpoint is pruned. */
-      await drainDeletedAgentGenerations(req.user.id, deletedConversationIds, conversationDb);
+      await drainDeletedAgentGenerations(req.user.id, deletedConversationIds);
     }
     // HITL: prune the deleted conversations' durable checkpoints — a paused run's
     // checkpoint would otherwise persist until the Mongo TTL. Never throws.
@@ -510,12 +477,6 @@ router.delete('/all', configMiddleware, async (req, res) => {
       typeof req.user.tenantId === 'string' && req.user.tenantId !== ''
         ? req.user.tenantId
         : undefined;
-    // Console delete-all WRITE (MongoDB-elimination WU-2 remediation) — see
-    // the `GET /` list route above for the same seam.
-    const conversationDb = resolveConversationMethods({
-      req,
-      mongoMethods: { deleteConvos: db.deleteConvos, deleteMessages: db.deleteMessages },
-    });
     /** Fences new child admission for this owner, drains the live ones, and deletes
      * inside that fence: a child admitted on another replica mid-deletion would
      * otherwise keep running against conversations that no longer exist. */
@@ -523,7 +484,7 @@ router.delete('/all', configMiddleware, async (req, res) => {
       req.user.id,
       tenantId,
       () =>
-        conversationDb.deleteConvos(
+        db.deleteConvos(
           req.user.id,
           {},
           {
@@ -532,11 +493,7 @@ router.delete('/all', configMiddleware, async (req, res) => {
           },
         ),
     );
-    await drainDeletedAgentGenerations(
-      req.user.id,
-      dbResponse.conversationIds ?? [],
-      conversationDb,
-    );
+    await drainDeletedAgentGenerations(req.user.id, dbResponse.conversationIds ?? []);
     // HITL: prune ALL the deleted conversations' durable checkpoints in one bulk pass.
     await deleteAgentCheckpoints(
       dbResponse.conversationIds,
@@ -570,17 +527,7 @@ router.post('/archive', validateConvoAccess, async (req, res) => {
   }
 
   try {
-    // Console archive WRITE (MongoDB-elimination WU-2 remediation) — see the
-    // `GET /` list route above for the same seam. Deviation, disclosed in
-    // the build record: WU-1's upsert has no "update-only" mode, so
-    // archiving a conversation id that does not yet exist in the sovereign
-    // store CREATES it (already-archived) instead of 404ing, unlike
-    // Mongo's `noUpsert: true`.
-    const { saveConvo } = resolveConversationMethods({
-      req,
-      mongoMethods: { saveConvo: db.saveConvo },
-    });
-    const dbResponse = await saveConvo(
+    const dbResponse = await db.saveConvo(
       {
         userId: req?.user?.id,
         isTemporary: req?.body?.isTemporary,
@@ -632,13 +579,7 @@ router.post('/pin', validateConvoAccess, async (req, res) => {
   }
 
   try {
-    // Console pin WRITE (MongoDB-elimination WU-2 remediation) — see the
-    // `GET /` list route above for the same seam.
-    const { setConvoPinned } = resolveConversationMethods({
-      req,
-      mongoMethods: { setConvoPinned: db.setConvoPinned },
-    });
-    const dbResponse = await setConvoPinned(req.user.id, conversationId, pinned);
+    const dbResponse = await db.setConvoPinned(req.user.id, conversationId, pinned);
 
     if (!dbResponse) {
       return res.status(404).json({ error: 'Conversation not found' });
@@ -687,13 +628,7 @@ router.post('/update', validateConvoAccess, configMiddleware, async (req, res) =
   }
 
   try {
-    // Console conversation-title WRITE (MongoDB-elimination WU-2) — see the
-    // `GET /` list route above for the same seam.
-    const { saveConvo } = resolveConversationMethods({
-      req,
-      mongoMethods: { saveConvo: db.saveConvo },
-    });
-    const dbResponse = await saveConvo(
+    const dbResponse = await db.saveConvo(
       {
         userId: req?.user?.id,
         isTemporary: req?.body?.isTemporary,
@@ -745,20 +680,16 @@ router.post(
   configMiddleware,
   handleUpload,
   restoreTenantContextFromReq,
+  // MongoDB-elimination WU-2b: multer's multipart parser can drop
+  // AsyncLocalStorage propagation (the same reason
+  // `restoreTenantContextFromReq` above exists) — re-establish the
+  // sovereign chokepoint's access-token context so `importConversations`'s
+  // eventual `~/models` calls see it. Infrastructure re-entry, not
+  // per-route sovereign wiring (the chokepoint itself lives in
+  // `api/models/index.js`).
+  restoreRequestAccessTokenContext,
   async (req, res) => {
     try {
-      // Console import WRITE (MongoDB-elimination WU-2 remediation) — see
-      // the `GET /` list route above for the same seam. Threaded down
-      // through `importConversations` -> `createImportBatchBuilder` ->
-      // `ImportBatchBuilder.saveBatch` (`utils/import/{importConversations,
-      // importBatchBuilder}.js`).
-      const conversationDb = resolveConversationMethods({
-        req,
-        mongoMethods: {
-          bulkSaveConvos: db.bulkSaveConvos,
-          bulkSaveMessages: db.bulkSaveMessages,
-        },
-      });
       /* TODO: optimize to return imported conversations and add manually */
       await importConversations({
         filepath: req.file.path,
@@ -766,7 +697,6 @@ router.post(
         userRole: req.user.role,
         interfaceConfig: req.config?.interfaceConfig,
         filters: req.config?.filters,
-        conversationDb,
         ...(req.config?.messageFilter?.pii == null
           ? {}
           : { legacyPii: req.config.messageFilter.pii }),
@@ -794,17 +724,6 @@ router.post('/fork', forkIpLimiter, forkUserLimiter, configMiddleware, async (re
   try {
     /** @type {TForkConvoRequest} */
     const { conversationId, messageId, option, splitAtTarget, latestMessageId } = req.body;
-    // Console fork WRITE (MongoDB-elimination WU-2 remediation) — see the
-    // `GET /` list route above for the same seam.
-    const conversationDb = resolveConversationMethods({
-      req,
-      mongoMethods: {
-        getConvo: db.getConvo,
-        getMessages: db.getMessages,
-        bulkSaveConvos: db.bulkSaveConvos,
-        bulkSaveMessages: db.bulkSaveMessages,
-      },
-    });
     const result = await forkConversation({
       requestUserId: req.user.id,
       originalConvoId: conversationId,
@@ -814,7 +733,6 @@ router.post('/fork', forkIpLimiter, forkUserLimiter, configMiddleware, async (re
       splitAtTarget,
       option,
       filters: req.config?.filters,
-      conversationDb,
       ...(req.config?.messageFilter?.pii == null
         ? {}
         : { legacyPii: req.config.messageFilter.pii }),
@@ -840,23 +758,11 @@ router.post(
     const { conversationId, title } = req.body;
 
     try {
-      // Console duplicate WRITE (MongoDB-elimination WU-2 remediation) —
-      // see the `GET /` list route above for the same seam.
-      const conversationDb = resolveConversationMethods({
-        req,
-        mongoMethods: {
-          getConvo: db.getConvo,
-          getMessages: db.getMessages,
-          bulkSaveConvos: db.bulkSaveConvos,
-          bulkSaveMessages: db.bulkSaveMessages,
-        },
-      });
       const result = await duplicateConversation({
         userId: req.user.id,
         conversationId,
         title,
         filters: req.config?.filters,
-        conversationDb,
         ...(req.config?.messageFilter?.pii == null
           ? {}
           : { legacyPii: req.config.messageFilter.pii }),

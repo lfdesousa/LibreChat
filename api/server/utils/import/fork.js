@@ -1,32 +1,11 @@
 const { v4: uuidv4 } = require('uuid');
 const { logger, tenantStorage } = require('@librechat/data-schemas');
 const { EModelEndpoint, Constants, ForkOptions } = require('librechat-data-provider');
-const db = require('~/models');
+const { getConvo, getMessages, getSharedMessages } = require('~/models');
 const { createImportBatchBuilder } = require('./importBatchBuilder');
 const { getAppConfig } = require('~/server/services/Config');
 const { resolveImportDefaultEndpoint } = require('./defaults');
 const BaseClient = require('~/app/clients/BaseClient');
-
-/**
- * Builds the extra `builderFactory` args that thread `conversationDb`
- * through to `createImportBatchBuilder`/`ImportBatchBuilder`, WITHOUT
- * ever changing the argument COUNT existing callers (and their exact
- * `toHaveBeenCalledWith` test assertions) see when `conversationDb` is
- * not supplied — see `forkConversation`'s docstring for the full
- * MongoDB-elimination WU-2 remediation rationale.
- *
- * @param {object|undefined} legacyPii
- * @param {object|undefined} conversationDb
- * @returns {unknown[]} `[]`, `[legacyPii]`, or `[legacyPii, conversationDb]`
- *   (with `legacyPii` normalized to `undefined` when absent but
- *   `conversationDb` is present, so it lands in the right slot).
- */
-function builderFactoryTrailingArgs(legacyPii, conversationDb) {
-  if (conversationDb == null) {
-    return legacyPii == null ? [] : [legacyPii];
-  }
-  return [legacyPii, conversationDb];
-}
 
 /**
  * Helper function to clone messages with proper parent-child relationships and timestamps
@@ -114,15 +93,7 @@ function cloneMessagesWithTimestamps(
  * @param {string} [params.latestMessageId] - latestMessageId - Required if splitAtTarget is true.
  * @param {object} [params.filters] - Source-aware content filters applied before cloned records are persisted.
  * @param {object} [params.legacyPii] - Legacy messageFilter.pii applied before cloned records are persisted.
- * @param {(userId: string, interfaceConfig?: object, filters?: object, legacyPii?: object, conversationDb?: object) => ImportBatchBuilder} [params.builderFactory] - Optional factory function for creating an ImportBatchBuilder instance.
- * @param {{getConvo: Function, getMessages: Function, bulkSaveConvos: Function, bulkSaveMessages: Function}} [params.conversationDb] -
- *   MongoDB-elimination WU-2 remediation: the caller's already-
- *   `resolveConversationMethods`-resolved conversation/message functions
- *   (`routes/convos.js`'s `POST /fork`). Defaults to the raw Mongo
- *   `~/models` functions (this module's own top-level `db` import) when
- *   omitted, so every EXISTING caller (e.g. the test suite, `POST
- *   /duplicate`'s own call into `forkConversation`-adjacent helpers) is
- *   byte-unchanged.
+ * @param {(userId: string, interfaceConfig?: object, filters?: object, legacyPii?: object) => ImportBatchBuilder} [params.builderFactory] - Optional factory function for creating an ImportBatchBuilder instance.
  * @returns {Promise<TForkConvoResponse>} The response after forking the conversation.
  */
 async function forkConversation({
@@ -137,12 +108,10 @@ async function forkConversation({
   filters,
   legacyPii,
   builderFactory = createImportBatchBuilder,
-  conversationDb,
 }) {
-  const resolvedDb = conversationDb || db;
   try {
-    const originalConvo = await resolvedDb.getConvo(requestUserId, originalConvoId);
-    let originalMessages = await resolvedDb.getMessages({
+    const originalConvo = await getConvo(requestUserId, originalConvoId);
+    let originalMessages = await getMessages({
       user: requestUserId,
       conversationId: originalConvoId,
     });
@@ -155,12 +124,10 @@ async function forkConversation({
       targetMessageId = latestMessageId;
     }
 
-    const importBatchBuilder = builderFactory(
-      requestUserId,
-      undefined,
-      filters,
-      ...builderFactoryTrailingArgs(legacyPii, conversationDb),
-    );
+    const importBatchBuilder =
+      legacyPii == null
+        ? builderFactory(requestUserId, undefined, filters)
+        : builderFactory(requestUserId, undefined, filters, legacyPii);
     importBatchBuilder.startConversation(originalConvo.endpoint ?? EModelEndpoint.openAI);
 
     let messagesToClone = [];
@@ -202,11 +169,8 @@ async function forkConversation({
       return result;
     }
 
-    const conversation = await resolvedDb.getConvo(
-      requestUserId,
-      result.conversation.conversationId,
-    );
-    const messages = await resolvedDb.getMessages({
+    const conversation = await getConvo(requestUserId, result.conversation.conversationId);
+    const messages = await getMessages({
       user: requestUserId,
       conversationId: conversation.conversationId,
     });
@@ -459,13 +423,8 @@ function isSameRevision(storedUpdatedAt, clientRevision) {
  * @param {string} [params.shareRevision] - `updatedAt` of the payload the viewer is forking from. A shareId now survives an update, so an owner republishing between the GET and the fork would silently shift `targetMessageIndex` onto a different branch; a mismatch is rejected instead of cloning content the viewer never saw.
  * @param {boolean} [params.snapshotFiles] - When `false`, file/attachment metadata is omitted from the cloned messages, mirroring the GET share route so the global shared-file kill switch is honored.
  * @param {(snapshot: object) => Promise<void>} [params.sharedContentPreflight] - Reapplies current policy to the exact public projection before a legacy shared-file snapshot is persisted.
- * @param {(userId: string, interfaceConfig?: object, filters?: object, legacyPii?: object, conversationDb?: object) => ImportBatchBuilder} [params.builderFactory] - Optional factory function for creating an ImportBatchBuilder instance.
+ * @param {(userId: string, interfaceConfig?: object, filters?: object, legacyPii?: object) => ImportBatchBuilder} [params.builderFactory] - Optional factory function for creating an ImportBatchBuilder instance.
  * @param {(options: object) => Promise<object>} [params.loadAppConfig] - Resolves the app config; injectable for tests. Called inside the requesting user's tenant context so retention policy is read from the viewer's tenant, not the share owner's.
- * @param {{getConvo: Function, getMessages: Function, bulkSaveConvos: Function, bulkSaveMessages: Function}} [params.conversationDb] -
- *   MongoDB-elimination WU-2 remediation — see `forkConversation`'s
- *   docstring. `getSharedMessages` (reading the anonymized SharedLink
- *   snapshot) is a SEPARATE persistence layer, not part of the
- *   conversations/messages store, and is unaffected by this parameter.
  * @returns {Promise<TForkConvoResponse | null>} The new conversation and messages, or null when the share is missing or empty.
  */
 async function forkSharedConversation({
@@ -480,13 +439,11 @@ async function forkSharedConversation({
   sharedContentPreflight,
   builderFactory = createImportBatchBuilder,
   loadAppConfig = getAppConfig,
-  conversationDb,
 }) {
-  const resolvedDb = conversationDb || db;
   // Mirror the GET share route: when the shared-file snapshot is globally
   // disabled, omit file/attachment metadata so a fork can't persist filenames
   // or share file URLs into the new conversation while file serving is off.
-  const share = await db.getSharedMessages(shareId, shareResourceId, {
+  const share = await getSharedMessages(shareId, shareResourceId, {
     snapshotFiles,
     preflight: sharedContentPreflight,
   });
@@ -564,12 +521,15 @@ async function forkSharedConversation({
     // can actually use; hard-coding OpenAI breaks the first follow-up message on
     // deployments that don't expose it.
     const { endpoint, model } = await resolveImportDefaultEndpoint({ requestUserId, userRole });
-    const importBatchBuilder = builderFactory(
-      requestUserId,
-      appConfig?.interfaceConfig,
-      appConfig?.filters,
-      ...builderFactoryTrailingArgs(appConfig?.messageFilter?.pii, conversationDb),
-    );
+    const importBatchBuilder =
+      appConfig?.messageFilter?.pii == null
+        ? builderFactory(requestUserId, appConfig?.interfaceConfig, appConfig?.filters)
+        : builderFactory(
+            requestUserId,
+            appConfig?.interfaceConfig,
+            appConfig?.filters,
+            appConfig.messageFilter.pii,
+          );
     importBatchBuilder.startConversation(endpoint);
 
     cloneMessagesWithTimestamps(messagesToClone, importBatchBuilder);
@@ -582,11 +542,8 @@ async function forkSharedConversation({
       conversationId: result.conversation.conversationId,
     });
 
-    const conversation = await resolvedDb.getConvo(
-      requestUserId,
-      result.conversation.conversationId,
-    );
-    const messages = await resolvedDb.getMessages({
+    const conversation = await getConvo(requestUserId, result.conversation.conversationId);
+    const messages = await getMessages({
       user: requestUserId,
       conversationId: conversation.conversationId,
     });
@@ -606,9 +563,7 @@ async function forkSharedConversation({
  * @param {string} [params.title] - Optional title override for the duplicate.
  * @param {object} [params.filters] - Source-aware content filters applied before cloned records are persisted.
  * @param {object} [params.legacyPii] - Legacy messageFilter.pii applied before cloned records are persisted.
- * @param {(userId: string, interfaceConfig?: object, filters?: object, legacyPii?: object, conversationDb?: object) => ImportBatchBuilder} [params.builderFactory] - Optional factory function for creating an ImportBatchBuilder instance.
- * @param {{getConvo: Function, getMessages: Function, bulkSaveConvos: Function, bulkSaveMessages: Function}} [params.conversationDb] -
- *   MongoDB-elimination WU-2 remediation — see `forkConversation`'s docstring.
+ * @param {(userId: string, interfaceConfig?: object, filters?: object, legacyPii?: object) => ImportBatchBuilder} [params.builderFactory] - Optional factory function for creating an ImportBatchBuilder instance.
  * @returns {Promise<{ conversation: TConversation, messages: TMessage[] }>} The duplicated conversation and messages.
  */
 async function duplicateConversation({
@@ -618,15 +573,13 @@ async function duplicateConversation({
   filters,
   legacyPii,
   builderFactory = createImportBatchBuilder,
-  conversationDb,
 }) {
-  const resolvedDb = conversationDb || db;
-  const originalConvo = await resolvedDb.getConvo(userId, conversationId);
+  const originalConvo = await getConvo(userId, conversationId);
   if (!originalConvo) {
     throw new Error('Conversation not found');
   }
 
-  const originalMessages = await resolvedDb.getMessages({
+  const originalMessages = await getMessages({
     user: userId,
     conversationId,
   });
@@ -636,12 +589,10 @@ async function duplicateConversation({
     originalMessages[originalMessages.length - 1].messageId,
   );
 
-  const importBatchBuilder = builderFactory(
-    userId,
-    undefined,
-    filters,
-    ...builderFactoryTrailingArgs(legacyPii, conversationDb),
-  );
+  const importBatchBuilder =
+    legacyPii == null
+      ? builderFactory(userId, undefined, filters)
+      : builderFactory(userId, undefined, filters, legacyPii);
   importBatchBuilder.startConversation(originalConvo.endpoint ?? EModelEndpoint.openAI);
 
   cloneMessagesWithTimestamps(messagesToClone, importBatchBuilder);
@@ -656,8 +607,8 @@ async function duplicateConversation({
     hasTitleOverride: typeof title === 'string' && title.length > 0,
   });
 
-  const conversation = await resolvedDb.getConvo(userId, result.conversation.conversationId);
-  const messages = await resolvedDb.getMessages({
+  const conversation = await getConvo(userId, result.conversation.conversationId);
+  const messages = await getMessages({
     user: userId,
     conversationId: conversation.conversationId,
   });

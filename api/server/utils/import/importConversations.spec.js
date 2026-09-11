@@ -119,32 +119,4 @@ describe('importConversations content filtering', () => {
     await expect(fs.stat(filepath)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(bulkSaveMessages).not.toHaveBeenCalled();
   });
-
-  describe('injected conversationDb (MongoDB-elimination WU-2 remediation)', () => {
-    it('threads job.conversationDb through to the builder, routing bulk writes there instead of Mongo', async () => {
-      const sovereignBulkSaveConvos = jest.fn().mockResolvedValue({ ok: true, count: 1 });
-      const sovereignBulkSaveMessages = jest.fn().mockResolvedValue({ ok: true, count: 1 });
-      getImporter.mockReturnValue(async (_jsonData, requestUserId, builderFactory) => {
-        const builder = builderFactory(requestUserId);
-        builder.startConversation(EModelEndpoint.openAI);
-        builder.addUserMessage('hello');
-        builder.finishConversation('safe title');
-        await builder.saveBatch();
-      });
-
-      await importConversations({
-        filepath,
-        requestUserId: 'user-123',
-        conversationDb: {
-          bulkSaveConvos: sovereignBulkSaveConvos,
-          bulkSaveMessages: sovereignBulkSaveMessages,
-        },
-      });
-
-      expect(sovereignBulkSaveConvos).toHaveBeenCalledTimes(1);
-      expect(sovereignBulkSaveMessages).toHaveBeenCalledTimes(1);
-      expect(bulkSaveConvos).not.toHaveBeenCalled();
-      expect(bulkSaveMessages).not.toHaveBeenCalled();
-    });
-  });
 });

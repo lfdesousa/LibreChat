@@ -40,7 +40,6 @@ const {
   restoreUserSchedulesFromDeletion,
 } = require('~/server/services/Schedules');
 const { getLogStores } = require('~/cache');
-const { resolveConversationMethods } = require('~/server/services/AuditTraceConversations');
 const db = require('~/models');
 
 const PUBLIC_USER_RESPONSE_FIELDS = [
@@ -425,23 +424,14 @@ const deleteUserController = async (req, res) => {
       ),
     );
 
-    // Account-deletion conversation/message WRITE (MongoDB-elimination
-    // WU-2 remediation): a user-initiated, req-scoped erasure — under
-    // `AUDITTRACE_MEMORY_BACKEND=sovereign` this must actually delete the
-    // sovereign rows too, or a deleted account would leave sovereign-only
-    // conversations/messages behind.
-    const conversationDb = resolveConversationMethods({
-      req,
-      mongoMethods: { deleteConvos: db.deleteConvos, deleteMessages: db.deleteMessages },
-    });
-    await conversationDb.deleteMessages({ user: user.id });
+    await db.deleteMessages({ user: user.id });
     await db.deleteAllUserSessions({ userId: user.id });
     await db.deleteTransactions({ user: user.id });
     await db.deleteUserKey({ userId: user.id, all: true });
     await db.deleteBalances({ user: user._id });
     await db.deletePresets(user.id);
     try {
-      const convoDeletion = await conversationDb.deleteConvos(user.id);
+      const convoDeletion = await db.deleteConvos(user.id);
       // HITL: prune the deleted conversations' durable checkpoints — a paused run's
       // checkpoint would otherwise persist until the Mongo TTL. Never throws.
       const appConfig =

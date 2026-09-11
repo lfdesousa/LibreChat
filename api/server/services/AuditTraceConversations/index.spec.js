@@ -15,9 +15,10 @@ const {
   deleteMessages,
   bulkSaveConvos,
   bulkSaveMessages,
-  resolveConversationMethods,
+  wrapModelMethods,
 } = require('./index');
 const { SovereignMemoryError, MissingAccessTokenError } = require('../AuditTraceMemory/errors');
+const { runWithRequestAccessToken } = require('./requestContext');
 
 const ORIGINAL_BACKEND = process.env.AUDITTRACE_MEMORY_BACKEND;
 
@@ -735,7 +736,7 @@ describe('AuditTraceConversations adapter (MongoDB-elimination WU-2)', () => {
     });
   });
 
-  describe('resolveConversationMethods — the Mongo-vs-sovereign routing seam', () => {
+  describe('wrapModelMethods — THE CHOKEPOINT (MongoDB-elimination WU-2b)', () => {
     const buildMongoMethods = () => ({
       saveConvo: jest.fn().mockResolvedValue({ mongo: true }),
       getConvosByCursor: jest.fn().mockResolvedValue({ conversations: [], nextCursor: null }),
@@ -751,37 +752,74 @@ describe('AuditTraceConversations adapter (MongoDB-elimination WU-2)', () => {
       deleteMessages: jest.fn().mockResolvedValue({ deletedCount: 0 }),
       bulkSaveConvos: jest.fn().mockResolvedValue({ mongo: true }),
       bulkSaveMessages: jest.fn().mockResolvedValue({ mongo: true }),
+      // A non-conversation/message export (e.g. `getUserById`) — must
+      // pass through wrapModelMethods completely untouched.
+      getUserById: jest.fn().mockResolvedValue({ mongo: true }),
     });
 
-    it('returns mongoMethods UNCHANGED (same reference) under the default mongo flag — byte-identical path', () => {
+    it('under the default mongo flag, every wrapped call still reaches the raw Mongo function unchanged', async () => {
       delete process.env.AUDITTRACE_MEMORY_BACKEND;
       const mongoMethods = buildMongoMethods();
-      const resolved = resolveConversationMethods({ req: {}, mongoMethods });
-      expect(resolved).toBe(mongoMethods);
+      const wrapped = wrapModelMethods(mongoMethods);
+      await wrapped.getConvo('u1', 'c1');
+      expect(mongoMethods.getConvo).toHaveBeenCalledWith('u1', 'c1');
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
     });
 
-    it('also returns mongoMethods unchanged for a non-"sovereign" value (fail-closed to mongo)', () => {
+    it('also falls to Mongo for a non-"sovereign" flag value (fail-closed to mongo)', async () => {
       process.env.AUDITTRACE_MEMORY_BACKEND = 'typo-value';
       const mongoMethods = buildMongoMethods();
-      expect(resolveConversationMethods({ req: {}, mongoMethods })).toBe(mongoMethods);
+      const wrapped = wrapModelMethods(mongoMethods);
+      await wrapped.getConvo('u1', 'c1');
+      expect(mongoMethods.getConvo).toHaveBeenCalled();
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
     });
 
-    it('under sovereign, binds only the keys present on mongoMethods, passing through an unrecognised key unchanged', () => {
+    it('passes through a non-chokepointed key completely unchanged (same function reference)', () => {
       process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
-      const unrelated = jest.fn();
-      const mongoMethods = { getConvo: jest.fn(), notOneOfTheNine: unrelated };
-      const resolved = resolveConversationMethods({ req: {}, mongoMethods });
-      expect(resolved.getConvo).not.toBe(mongoMethods.getConvo);
-      expect(resolved.notOneOfTheNine).toBe(unrelated);
+      const mongoMethods = buildMongoMethods();
+      const wrapped = wrapModelMethods(mongoMethods);
+      expect(wrapped.getUserById).toBe(mongoMethods.getUserById);
     });
 
-    it('under sovereign, getConvoOwnership is bound to the SAME implementation as getConvo (an existence+ownership alias)', async () => {
+    it('under sovereign but with NO request-context token, every chokepointed call still falls to Mongo', async () => {
+      process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+      const mongoMethods = buildMongoMethods();
+      const wrapped = wrapModelMethods(mongoMethods);
+      // No runWithRequestAccessToken() wrapper — simulates a background/
+      // scheduled job with no live HTTP request (the disclosed boundary).
+      await wrapped.getConvo('u1', 'c1');
+      expect(mongoMethods.getConvo).toHaveBeenCalledWith('u1', 'c1');
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+    });
+
+    it('under sovereign WITH a request-context token, routes to the sovereign adapter and NEVER calls the Mongo function', async () => {
+      process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+      const mongoMethods = buildMongoMethods();
+      const wrapped = wrapModelMethods(mongoMethods);
+      callConsoleConversationsProxy.mockResolvedValueOnce(CONVO_ITEM);
+
+      const result = await runWithRequestAccessToken({ accessToken: 'user-bearer-token' }, () =>
+        wrapped.getConvo('u1', 'c1'),
+      );
+
+      expect(result.conversationId).toBe('c1');
+      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'GET', path: 'c1', token: 'user-bearer-token' }),
+      );
+      expect(mongoMethods.getConvo).not.toHaveBeenCalled();
+    });
+
+    it('getConvoOwnership is bound to the SAME implementation as getConvo (an existence+ownership alias)', async () => {
       process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
       const mongoMethods = { getConvoOwnership: jest.fn() };
-      const req = { session: { openidTokens: { accessToken: 'tok' } } };
-      const resolved = resolveConversationMethods({ req, mongoMethods });
+      const wrapped = wrapModelMethods(mongoMethods);
       callConsoleConversationsProxy.mockResolvedValueOnce(CONVO_ITEM);
-      const result = await resolved.getConvoOwnership('u1', 'c1');
+
+      const result = await runWithRequestAccessToken({ accessToken: 'tok' }, () =>
+        wrapped.getConvoOwnership('u1', 'c1'),
+      );
+
       expect(result.conversationId).toBe('c1');
       expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
         expect.objectContaining({ method: 'GET', path: 'c1', token: 'tok' }),
@@ -790,27 +828,85 @@ describe('AuditTraceConversations adapter (MongoDB-elimination WU-2)', () => {
     });
 
     /**
-     * NON-VACUOUS guard, per the ratified spec's acceptance criterion:
-     * "flip isSovereignBackend() off (or stub it) -> the method uses the
-     * Mongo path and the sovereign-path test goes RED (proves the shim is
-     * actually wired, not dead)." Verified by hand during the build (both
-     * the original build and this 2026-09-11 remediation pass):
-     * temporarily hardcoding `resolveConversationMethods` to always
-     * `return mongoMethods` (dropping the sovereign branch) turns every
-     * assertion in this `it()`, plus `convos-sovereign.spec.js` and
-     * `messages-sovereign.spec.js`'s new assertions, RED; restored,
-     * re-verified GREEN. See the build record.
+     * STRUCTURAL-COMPLETENESS proof: simulates `services/Schedules/index.js`
+     * threading `require('~/models')` in as an injected `methods`
+     * constructor param — the exact caller shape that evaded three rounds
+     * of route-level, name-based-enumeration wiring. Since `wrapped` here
+     * is the SAME kind of object `require('~/models')` now exports (every
+     * caller shape receives it), an injected-methods caller with a
+     * request-context token routes sovereign with NO additional wiring of
+     * its own.
      */
-    it('under sovereign, forwards every shimmed method to the adapter and NEVER calls the injected Mongo functions', async () => {
+    it('an injected-methods-param caller (the schedules/agent-trigger shape) routes sovereign under a request-context token, with NO per-caller wiring', async () => {
       process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
       const mongoMethods = buildMongoMethods();
-      const req = { session: { openidTokens: { accessToken: 'user-bearer-token' } } };
-      const resolved = resolveConversationMethods({ req, mongoMethods });
-
-      expect(resolved).not.toBe(mongoMethods);
-      for (const name of Object.keys(mongoMethods)) {
-        expect(resolved[name]).not.toBe(mongoMethods[name]);
+      const wrapped = wrapModelMethods(mongoMethods);
+      // Mirrors `createSchedulesService({ methods: require('~/models'), ... })`:
+      // some OTHER subsystem receives the wrapped object as a constructor
+      // param and calls a method off it — no `resolveConversationMethods`
+      // or `conversationDb` concept exists at that call site anymore.
+      function injectedMethodsCaller({ methods }) {
+        return methods.saveConvo({ userId: 'u1' }, { conversationId: 'c1' }, {});
       }
+      callConsoleConversationsProxy
+        .mockRejectedValueOnce(new SovereignMemoryError('not found', 404)) // existing-fetch
+        .mockResolvedValueOnce(CONVO_ITEM); // upsert
+
+      const result = await runWithRequestAccessToken(
+        { accessToken: 'schedule-run-now-token' },
+        () => injectedMethodsCaller({ methods: wrapped }),
+      );
+
+      expect(result.conversationId).toBe('c1');
+      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ token: 'schedule-run-now-token' }),
+      );
+      expect(mongoMethods.saveConvo).not.toHaveBeenCalled();
+    });
+
+    /**
+     * THE ONE HONEST BOUNDARY: a background/scheduled run with NO live
+     * request (no `runWithRequestAccessToken` wrapper at all — a genuine
+     * cron-style fire, not a "run now" triggered inside a request) has no
+     * token to read, so it falls to Mongo even under the sovereign flag.
+     * This is the single disclosed category the ratified spec names —
+     * verified here at the SAME injected-methods-param call shape as the
+     * "routes sovereign" test above, differing ONLY in the absence of a
+     * request context.
+     */
+    it('the SAME injected-methods-param caller falls to Mongo with NO live request context (the disclosed background-writes boundary)', async () => {
+      process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+      const mongoMethods = buildMongoMethods();
+      const wrapped = wrapModelMethods(mongoMethods);
+      function injectedMethodsCaller({ methods }) {
+        return methods.saveConvo({ userId: 'u1' }, { conversationId: 'c1' }, {});
+      }
+
+      await injectedMethodsCaller({ methods: wrapped });
+
+      expect(mongoMethods.saveConvo).toHaveBeenCalledWith(
+        { userId: 'u1' },
+        { conversationId: 'c1' },
+        {},
+      );
+      expect(callConsoleConversationsProxy).not.toHaveBeenCalled();
+    });
+
+    /**
+     * NON-VACUOUS guard, per the ratified spec's acceptance criterion:
+     * "disable the chokepoint branch (force the model exports to always
+     * use Mongo) -> the sovereign-path assertions go RED across the
+     * specs; restore -> green." Verified by hand during the build:
+     * temporarily hardcoding `wrapModelMethods` to `return mongoMethods`
+     * unchanged (dropping the chokepoint branch entirely) turns every
+     * "routes sovereign"/"NEVER calls the Mongo function" assertion in
+     * this describe block RED; restored, re-verified GREEN. See the
+     * build record.
+     */
+    it('under sovereign with a token, forwards EVERY chokepointed method to the adapter and NEVER calls the injected Mongo functions', async () => {
+      process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
+      const mongoMethods = buildMongoMethods();
+      const wrapped = wrapModelMethods(mongoMethods);
 
       // Each call is isolated (mock reset immediately before it) so the
       // exact number/order of internal existing-fetch GETs a given method
@@ -825,57 +921,59 @@ describe('AuditTraceConversations adapter (MongoDB-elimination WU-2)', () => {
         throw new SovereignMemoryError('not found', 404);
       };
 
-      freshStub(notFound); // saveConvo: existing-fetch 404s, then... needs a POST too
-      callConsoleConversationsProxy
-        .mockImplementationOnce(notFound)
-        .mockResolvedValueOnce(CONVO_ITEM);
-      await resolved.saveConvo({ userId: 'u1' }, { conversationId: 'c1' }, {});
+      await runWithRequestAccessToken({ accessToken: 'user-bearer-token' }, async () => {
+        freshStub(notFound);
+        callConsoleConversationsProxy
+          .mockImplementationOnce(notFound)
+          .mockResolvedValueOnce(CONVO_ITEM);
+        await wrapped.saveConvo({ userId: 'u1' }, { conversationId: 'c1' }, {});
 
-      freshStub(async () => ({ items: [], next_cursor: null }));
-      await resolved.getConvosByCursor('u1', {});
+        freshStub(async () => ({ items: [], next_cursor: null }));
+        await wrapped.getConvosByCursor('u1', {});
 
-      freshStub(async () => CONVO_ITEM);
-      await resolved.getConvo('u1', 'c1');
-      await resolved.getConvoOwnership('u1', 'c1');
+        freshStub(async () => CONVO_ITEM);
+        await wrapped.getConvo('u1', 'c1');
+        await wrapped.getConvoOwnership('u1', 'c1');
 
-      freshStub(notFound);
-      callConsoleConversationsProxy
-        .mockImplementationOnce(notFound)
-        .mockResolvedValueOnce(CONVO_ITEM);
-      await resolved.setConvoPinned('u1', 'c1', true);
+        freshStub(notFound);
+        callConsoleConversationsProxy
+          .mockImplementationOnce(notFound)
+          .mockResolvedValueOnce(CONVO_ITEM);
+        await wrapped.setConvoPinned('u1', 'c1', true);
 
-      freshStub(async () => undefined);
-      await resolved.deleteConvos('u1', { conversationId: 'c1' });
+        freshStub(async () => undefined);
+        await wrapped.deleteConvos('u1', { conversationId: 'c1' });
 
-      freshStub(async () => MESSAGE_ITEM);
-      await resolved.saveMessage({ userId: 'u1' }, { conversationId: 'c1', messageId: 'm1' }, {});
+        freshStub(async () => MESSAGE_ITEM);
+        await wrapped.saveMessage({ userId: 'u1' }, { conversationId: 'c1', messageId: 'm1' }, {});
 
-      freshStub(notFound);
-      callConsoleConversationsProxy
-        .mockImplementationOnce(notFound)
-        .mockResolvedValueOnce(MESSAGE_ITEM);
-      await resolved.updateMessage('u1', { conversationId: 'c1', messageId: 'm1', text: 'x' }, {});
+        freshStub(notFound);
+        callConsoleConversationsProxy
+          .mockImplementationOnce(notFound)
+          .mockResolvedValueOnce(MESSAGE_ITEM);
+        await wrapped.updateMessage('u1', { conversationId: 'c1', messageId: 'm1', text: 'x' }, {});
 
-      freshStub(async () => ({ items: [MESSAGE_ITEM] }));
-      await resolved.getMessages({ conversationId: 'c1' });
+        freshStub(async () => ({ items: [MESSAGE_ITEM] }));
+        await wrapped.getMessages({ conversationId: 'c1' });
 
-      freshStub(async () => ({ items: [MESSAGE_ITEM] }));
-      await resolved.getMessagesByCursor({ conversationId: 'c1' });
+        freshStub(async () => ({ items: [MESSAGE_ITEM] }));
+        await wrapped.getMessagesByCursor({ conversationId: 'c1' });
 
-      freshStub(async () => ({ items: [MESSAGE_ITEM] }));
-      await resolved.getMessage({ conversationId: 'c1', messageId: 'm1' });
+        freshStub(async () => ({ items: [MESSAGE_ITEM] }));
+        await wrapped.getMessage({ conversationId: 'c1', messageId: 'm1' });
 
-      freshStub(async ({ method }) => (method === 'GET' ? { items: [MESSAGE_ITEM] } : undefined));
-      await resolved.deleteMessages({ conversationId: 'c1' });
+        freshStub(async ({ method }) => (method === 'GET' ? { items: [MESSAGE_ITEM] } : undefined));
+        await wrapped.deleteMessages({ conversationId: 'c1' });
 
-      freshStub(notFound);
-      callConsoleConversationsProxy
-        .mockImplementationOnce(notFound)
-        .mockResolvedValueOnce(CONVO_ITEM);
-      await resolved.bulkSaveConvos([{ conversationId: 'c1' }]);
+        freshStub(notFound);
+        callConsoleConversationsProxy
+          .mockImplementationOnce(notFound)
+          .mockResolvedValueOnce(CONVO_ITEM);
+        await wrapped.bulkSaveConvos([{ conversationId: 'c1' }]);
 
-      freshStub(async () => MESSAGE_ITEM);
-      await resolved.bulkSaveMessages([{ conversationId: 'c1', messageId: 'm1' }], true);
+        freshStub(async () => MESSAGE_ITEM);
+        await wrapped.bulkSaveMessages([{ conversationId: 'c1', messageId: 'm1' }], true);
+      });
 
       // The adapter's HTTP boundary was used with the forwarded token...
       expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
@@ -883,24 +981,22 @@ describe('AuditTraceConversations adapter (MongoDB-elimination WU-2)', () => {
       );
       // ...and NONE of the caller's own Mongo functions were ever invoked.
       for (const fn of Object.values(mongoMethods)) {
+        if (fn === mongoMethods.getUserById) {
+          continue; // not chokepointed, irrelevant to this assertion
+        }
         expect(fn).not.toHaveBeenCalled();
       }
     });
 
-    it('under sovereign with no session token, the adapter call fails closed rather than silently falling back to Mongo', async () => {
+    it('under sovereign with a token but the sovereign call itself fails, fails closed rather than silently falling back to Mongo', async () => {
       process.env.AUDITTRACE_MEMORY_BACKEND = 'sovereign';
       const mongoMethods = buildMongoMethods();
-      const resolved = resolveConversationMethods({ req: {}, mongoMethods });
+      const wrapped = wrapModelMethods(mongoMethods);
+      callConsoleConversationsProxy.mockRejectedValueOnce(new SovereignMemoryError('boom', 500));
 
-      // No access token forwarded — `client.js` is mocked here (this
-      // suite exercises the resolver seam, not the HTTP boundary), so the
-      // no-token 401 is simulated at the same mocked boundary
-      // `client.spec.js` proves it for real.
-      callConsoleConversationsProxy.mockRejectedValueOnce(new MissingAccessTokenError());
-      await expect(resolved.getConvo('u1', 'c1')).rejects.toBeInstanceOf(MissingAccessTokenError);
-      expect(callConsoleConversationsProxy).toHaveBeenCalledWith(
-        expect.objectContaining({ token: null }),
-      );
+      await expect(
+        runWithRequestAccessToken({ accessToken: 'tok' }, () => wrapped.getConvo('u1', 'c1')),
+      ).rejects.toMatchObject({ status: 500 });
       expect(mongoMethods.getConvo).not.toHaveBeenCalled();
     });
   });

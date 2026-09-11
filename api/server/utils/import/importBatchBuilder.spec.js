@@ -257,41 +257,6 @@ describe('ImportBatchBuilder content filtering', () => {
     expect(bulkIncrementTagCounts).toHaveBeenCalledTimes(1);
   });
 
-  describe('injected conversationDb (MongoDB-elimination WU-2 remediation)', () => {
-    it('routes bulk writes through an injected conversationDb, never the raw Mongo functions', async () => {
-      const sovereignBulkSaveConvos = jest.fn().mockResolvedValue({ ok: true, count: 1 });
-      const sovereignBulkSaveMessages = jest.fn().mockResolvedValue({ ok: true, count: 1 });
-      const builder = new ImportBatchBuilder('user-123', undefined, undefined, undefined, {
-        bulkSaveConvos: sovereignBulkSaveConvos,
-        bulkSaveMessages: sovereignBulkSaveMessages,
-      });
-      builder.startConversation(EModelEndpoint.openAI);
-      builder.saveMessage({ sender: 'user', isCreatedByUser: true, text: 'hi' });
-      builder.finishConversation('safe title', new Date('2026-01-01T00:00:00.000Z'));
-
-      await expect(builder.saveBatch()).resolves.toBeUndefined();
-
-      expect(sovereignBulkSaveConvos).toHaveBeenCalledTimes(1);
-      expect(sovereignBulkSaveMessages).toHaveBeenCalledTimes(1);
-      expect(bulkSaveConvos).not.toHaveBeenCalled();
-      expect(bulkSaveMessages).not.toHaveBeenCalled();
-      // Tag counts have no sovereign equivalent — always Mongo, disclosed.
-      expect(bulkIncrementTagCounts).toHaveBeenCalledTimes(1);
-    });
-
-    it('falls back to the raw Mongo functions when no conversationDb is injected (byte-unchanged default)', async () => {
-      const builder = new ImportBatchBuilder('user-123');
-      builder.startConversation(EModelEndpoint.openAI);
-      builder.saveMessage({ sender: 'user', isCreatedByUser: true, text: 'hi' });
-      builder.finishConversation('safe title', new Date('2026-01-01T00:00:00.000Z'));
-
-      await expect(builder.saveBatch()).resolves.toBeUndefined();
-
-      expect(bulkSaveConvos).toHaveBeenCalledTimes(1);
-      expect(bulkSaveMessages).toHaveBeenCalledTimes(1);
-    });
-  });
-
   it('blocks opaque imported content before starting any bulk write', async () => {
     const opaqueValue = 'data:image/png;base64,IMPORT-OPAQUE-DO-NOT-ECHO';
     const builder = createBuilder(
