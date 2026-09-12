@@ -35,12 +35,18 @@ const seedDatabase = async () => {
  * `deletePromptGroup`/`deleteUserPrompts`/`incrementPromptGroupUsage` —
  * `server/services/AuditTracePrompts/index.js`; the prompt ACL/sharing
  * methods and single-version delete deliberately stay unwired, see that
- * module's docstring), both merged into the SAME `wrapModelMethods()`
- * call below — still exactly one call site, one `AsyncLocalStorage`.
- * Every other `~/models` export (users, roles, files, agent-event
- * actors, subagent threads, …) passes through `wrapModelMethods`
- * unchanged — this only touches the named conversation/message/preset/
- * prompt methods.
+ * module's docstring), then by WU-chatprojects (2026-09-12, the third
+ * reuse) to also cover the chat-project-persistence methods
+ * (`createChatProject`/`getChatProject`/`listChatProjects`/
+ * `updateChatProject`/`deleteChatProject` —
+ * `server/services/AuditTraceChatProjects/index.js`;
+ * `assignConversationToProject` and `refreshChatProjectStats`
+ * deliberately stay unwired, see that module's docstring), all merged
+ * into the SAME `wrapModelMethods()` call below — still exactly one call
+ * site, one `AsyncLocalStorage`. Every other `~/models` export (users,
+ * roles, files, agent-event actors, subagent threads, …) passes through
+ * `wrapModelMethods` unchanged — this only touches the named
+ * conversation/message/preset/prompt/chat-project methods.
  */
 const wrappedMethods = wrapModelMethods(methods);
 

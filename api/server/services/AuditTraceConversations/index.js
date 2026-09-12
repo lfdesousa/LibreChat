@@ -80,9 +80,20 @@
  * `ALL_SOVEREIGN_METHOD_BINDERS` below — see that module's docstring for
  * its own ground-the-surface enumeration, the ACL/sharing methods it
  * deliberately leaves unwired (no sovereign equivalent), and the
- * single-version-delete store-capability gap. Every OTHER `~/models`
- * export (users, roles, files, agent-event actors, subagent threads, …)
- * still passes through `wrapModelMethods` unchanged.
+ * single-version-delete store-capability gap.
+ *
+ * **WU-chatprojects extension (2026-09-12, THIRD reuse of this
+ * chokepoint).** `../AuditTraceChatProjects::SOVEREIGN_METHOD_BINDERS`
+ * (`createChatProject`, `getChatProject`, `listChatProjects`,
+ * `updateChatProject`, `deleteChatProject`) is ALSO merged into
+ * `ALL_SOVEREIGN_METHOD_BINDERS` below — see that module's docstring for
+ * its own ground-the-surface enumeration, why `assignConversationToProject`
+ * deliberately stays unwired (a conversation-domain write this shim's own
+ * territory owns, not chat-projects'), and why `refreshChatProjectStats`
+ * deliberately stays unwired (a genuine cross-domain store-capability
+ * gap). Every OTHER `~/models` export (users, roles, files, agent-event
+ * actors, subagent threads, …) still passes through `wrapModelMethods`
+ * unchanged.
  */
 
 const { callConsoleConversationsProxy } = require('./client');
@@ -111,6 +122,11 @@ const {
 const {
   SOVEREIGN_METHOD_BINDERS: PROMPT_SOVEREIGN_METHOD_BINDERS,
 } = require('../AuditTracePrompts');
+// MongoDB-elimination WU-chatprojects (2026-09-12, the THIRD reuse of
+// this chokepoint) — same discipline as the merges above.
+const {
+  SOVEREIGN_METHOD_BINDERS: CHAT_PROJECT_SOVEREIGN_METHOD_BINDERS,
+} = require('../AuditTraceChatProjects');
 
 const COLLECT_ALL_PAGE_SIZE = 100;
 const DEFAULT_MESSAGES_BY_CURSOR_LIMIT = 25;
@@ -771,7 +787,9 @@ const SOVEREIGN_METHOD_BINDERS = {
  * (MongoDB-elimination WU-presets, 2026-09-11: the FIRST reuse of this
  * chokepoint pattern for a domain other than conversations) AND
  * `AuditTracePrompts::SOVEREIGN_METHOD_BINDERS` (WU-prompts, the SAME
- * day: the SECOND reuse). Adding a FUTURE domain's binders (agents,
+ * day: the SECOND reuse) AND
+ * `AuditTraceChatProjects::SOVEREIGN_METHOD_BINDERS` (WU-chatprojects,
+ * 2026-09-12: the THIRD reuse). Adding a FUTURE domain's binders (agents,
  * files, ...) means adding one more spread here — `wrapModelMethods`
  * itself, `api/models/index.js`'s single call site, and the
  * `AsyncLocalStorage` in `./requestContext` all stay unchanged, which is
@@ -782,6 +800,7 @@ const ALL_SOVEREIGN_METHOD_BINDERS = {
   ...SOVEREIGN_METHOD_BINDERS,
   ...PRESET_SOVEREIGN_METHOD_BINDERS,
   ...PROMPT_SOVEREIGN_METHOD_BINDERS,
+  ...CHAT_PROJECT_SOVEREIGN_METHOD_BINDERS,
 };
 
 /**
@@ -826,11 +845,13 @@ const ALL_SOVEREIGN_METHOD_BINDERS = {
  *
  * A `mongoMethods` key with no `ALL_SOVEREIGN_METHOD_BINDERS` entry
  * (every OTHER `~/models` export — users, roles, files, agent-event
- * actors, subagent threads, prompt ACL/sharing methods, …) is returned
- * unchanged; this function only ever touches the named conversation/
- * message/preset/prompt methods (the `AuditTracePresets`/
- * `AuditTracePrompts` merges above are the WU-presets/WU-prompts
- * extensions — see this module's docstring's "Method coverage" section).
+ * actors, subagent threads, prompt ACL/sharing methods,
+ * `assignConversationToProject`, `refreshChatProjectStats`, …) is
+ * returned unchanged; this function only ever touches the named
+ * conversation/message/preset/prompt/chat-project methods (the
+ * `AuditTracePresets`/`AuditTracePrompts`/`AuditTraceChatProjects` merges
+ * above are the WU-presets/WU-prompts/WU-chatprojects extensions — see
+ * this module's docstring's "Method coverage" section).
  *
  * @param {Record<string, Function>} mongoMethods - the FULL `createMethods(...)`
  *   output (or any object containing some of the same-named methods).
