@@ -41,12 +41,19 @@ const seedDatabase = async () => {
  * `updateChatProject`/`deleteChatProject` —
  * `server/services/AuditTraceChatProjects/index.js`;
  * `assignConversationToProject` and `refreshChatProjectStats`
- * deliberately stay unwired, see that module's docstring), all merged
- * into the SAME `wrapModelMethods()` call below — still exactly one call
- * site, one `AsyncLocalStorage`. Every other `~/models` export (users,
- * roles, files, agent-event actors, subagent threads, …) passes through
- * `wrapModelMethods` unchanged — this only touches the named
- * conversation/message/preset/prompt/chat-project methods.
+ * deliberately stay unwired, see that module's docstring), then by the
+ * Files domain (2026-09-13, the fourth reuse — the FIRST domain built on
+ * the `AuditTraceSovereignAdapter` base after three hand-written files
+ * shims were REJECTED) to also cover the file-persistence methods
+ * (`findFileById`/`getFiles`/`createFile`/`updateFile`/`updateFileUsage`/
+ * `updateFilesUsage`/`deleteFile`/`deleteFiles` —
+ * `server/services/AuditTraceFiles/index.js`; 9 of the 17 `~/models`
+ * file methods deliberately stay unwired, see that module's docstring),
+ * all merged into the SAME `wrapModelMethods()` call below — still
+ * exactly one call site, one `AsyncLocalStorage`. Every other `~/models`
+ * export (users, roles, agent-event actors, subagent threads, …) passes
+ * through `wrapModelMethods` unchanged — this only touches the named
+ * conversation/message/preset/prompt/chat-project/file methods.
  */
 const wrappedMethods = wrapModelMethods(methods);
 
