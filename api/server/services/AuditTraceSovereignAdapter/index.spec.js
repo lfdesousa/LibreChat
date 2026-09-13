@@ -967,7 +967,7 @@ describe('AuditTraceSovereignAdapter — the base owns every invariant, proven o
       expect(rawSibling).toHaveBeenCalledTimes(1);
     });
 
-    it('the view is READ-ONLY: set/defineProperty/deleteProperty/setPrototypeOf/preventExtensions are refused and the SHARED target map is untouched — a domain cannot swap a guarded entry for a raw one', async () => {
+    it('the view is READ-ONLY: defineProperty/deleteProperty/setPrototypeOf/preventExtensions are each refused (one trap each, individually falsifiable) and the SHARED target map is untouched — a domain cannot swap a guarded entry for a raw one', async () => {
       const rawSibling = jest.fn().mockResolvedValue(stranger);
       const injected = jest.fn().mockResolvedValue(stranger);
       const { adapter } = makeAdapter();
@@ -978,6 +978,9 @@ describe('AuditTraceSovereignAdapter — the base owns every invariant, proven o
         TypeError,
       );
       expect(() => Object.defineProperty(view, 'injected', { value: injected })).toThrow(TypeError);
+      // Assignment is refused too, but NOT by the `set` trap — see the F-C1
+      // test below for the disclosure; these two lines are behavioural and
+      // are NOT what makes this test's title true.
       expect(Reflect.set(view, 'sweepWidgets', injected)).toBe(false);
       expect(Reflect.set(view, 'injected', injected)).toBe(false);
       expect(Reflect.deleteProperty(view, 'sweepWidgets')).toBe(false);
@@ -995,6 +998,136 @@ describe('AuditTraceSovereignAdapter — the base owns every invariant, proven o
       expect(await view.sweepWidgets({ widget_id: undefined })).toBeNull();
       expect(rawSibling).not.toHaveBeenCalled();
       expect(injected).not.toHaveBeenCalled();
+    });
+
+    /**
+     * F-C1 — the ASSIGNMENT surface, pinned BEHAVIOURALLY.
+     *
+     * This test pins what actually protects the map: a domain cannot put a
+     * raw callable on the shared view by assignment. It deliberately does
+     * NOT claim to pin the `set` trap. `set: refuse` is
+     * REDUNDANT-BUT-RETAINED: with it removed, `[[Set]]` falls to
+     * `OrdinarySetWithOwnDescriptor` with `Receiver` = the proxy, which
+     * consults the `getOwnPropertyDescriptor` trap and then calls
+     * `Receiver.[[DefineOwnProperty]]` — `defineProperty: refuse`. So this
+     * test stays GREEN when `set: refuse` alone is deleted, and that is
+     * disclosed rather than papered over (reviewer F-C1,
+     * `lesson-neuter-guards-individually-20260913`). Deleting BOTH
+     * `set: refuse` and `defineProperty: refuse` turns it RED on the side
+     * effect below — the injected raw callable lands on the shared target
+     * and the next sibling read hands it back.
+     */
+    it('F-C1 (behavioural, NOT a `set`-trap pin): assignment cannot introduce a raw callable — strict-mode assignment throws, Reflect.set reports false, the SHARED target keeps the raw entry, and the next read is still guarded. Refused terminally by `defineProperty`; `set: refuse` is redundant-but-retained defence-in-depth (neuter BOTH for the RED)', async () => {
+      // The sibling's OWN row, distinct from the stranger row queued on the
+      // hostile callable, so the RED below is the leak itself and not a
+      // shape diff: if the swap lands, a SAFE sibling call returns the
+      // stranger row instead of the sibling's own.
+      const ownRow = [{ widget_id: 'w1', text: 'the real sibling' }];
+      const rawSibling = jest.fn().mockResolvedValue(ownRow);
+      const injected = jest.fn().mockResolvedValue(stranger);
+      const { adapter } = makeAdapter();
+      const target = { sweepWidgets: rawSibling };
+      const view = adapter.guardMongoMethods(target);
+
+      // Attempt the swap by both assignment shapes. Refusal surfaces either
+      // as `false` or as a TypeError depending on the caller's mode, so the
+      // attempts are made TOLERANTLY here and the assertions below are on
+      // the SIDE EFFECT, never on the refusal mechanism — a neutered pair
+      // must go RED on the leak, not on how the leak was reported.
+      const setReported = Reflect.set(view, 'sweepWidgets', injected);
+      const newKeyReported = Reflect.set(view, 'injected', injected);
+      // This spec file is CommonJS (sloppy mode), where a refused `[[Set]]`
+      // is a silent no-op; the directive makes the refusal observable as
+      // the TypeError a strict-mode caller actually gets.
+      function strictAssign(v, x) {
+        'use strict';
+        v.sweepWidgets = x;
+      }
+      let strictThrew = false;
+      try {
+        strictAssign(view, injected);
+      } catch {
+        strictThrew = true;
+      }
+
+      // SIDE EFFECT — the assertions that carry the security claim. The
+      // SHARED map still holds the chokepoint's entry, so a sibling call
+      // reaches the REAL sibling and returns ITS row; the hostile callable
+      // is never invoked and the stranger row never comes back.
+      expect(await view.sweepWidgets({ widget_id: 'w1' })).toBe(ownRow);
+      expect(await view.sweepWidgets({ widget_id: 'w1' })).not.toBe(stranger);
+      expect(injected).not.toHaveBeenCalled();
+      expect(rawSibling).toHaveBeenCalledTimes(2);
+      expect(target.sweepWidgets).toBe(rawSibling);
+      expect(Object.hasOwn(target, 'injected')).toBe(false);
+      // The guard survives the attempt too — the entry is still wrapped.
+      expect(await view.sweepWidgets({ widget_id: undefined })).toBeNull();
+      expect(rawSibling).toHaveBeenCalledTimes(2);
+
+      // Only now, the refusal MECHANISM (secondary; not the security claim).
+      expect(setReported).toBe(false);
+      expect(newKeyReported).toBe(false);
+      expect(strictThrew).toBe(true);
+    });
+
+    it('F-C2: the PROTOTYPE CHAIN is trapped — Object.getPrototypeOf(view) reports Object.prototype even for an exotic target, so a callable living on the target prototype is NOT reachable raw (NEUTER: drop the `getPrototypeOf` trap → the raw fn is called and the stranger row comes back: RED)', async () => {
+      const rawSibling = jest.fn().mockResolvedValue(stranger);
+      const { adapter } = makeAdapter();
+
+      // A target whose CALLABLE lives on its prototype, not as an own key.
+      const exotic = Object.create({ leak: rawSibling });
+      const exoticView = adapter.guardMongoMethods(exotic);
+
+      // SIDE EFFECT FIRST — walk the prototype exactly as a hostile impl
+      // would and CALL whatever it yields with a strippable filter. Without
+      // the trap `proto` IS `{leak: rawSibling}`, so this calls the raw fn
+      // and hands back the stranger row: RED on the leak, not on a shape.
+      const proto = Object.getPrototypeOf(exoticView);
+      const reached = Reflect.get(proto, 'leak');
+      const viaPrototype =
+        typeof reached === 'function' ? await reached({ _id: undefined }) : reached;
+      expect(viaPrototype).toBeUndefined();
+      expect(viaPrototype).not.toEqual(stranger);
+      expect(rawSibling).not.toHaveBeenCalled();
+
+      // The same walk on a CLASS-INSTANCE target — the other exotic shape.
+      class M {}
+      M.prototype.leak = rawSibling;
+      const classProto = Object.getPrototypeOf(adapter.guardMongoMethods(new M()));
+      const classReached = Reflect.get(classProto, 'leak');
+      const viaClassProto =
+        typeof classReached === 'function' ? await classReached({ _id: undefined }) : classReached;
+      expect(viaClassProto).toBeUndefined();
+      expect(viaClassProto).not.toEqual(stranger);
+      expect(rawSibling).not.toHaveBeenCalled();
+
+      // Only then the shape the trap reports (secondary).
+      expect(proto).toBe(Object.prototype);
+      expect(classProto).toBe(Object.prototype);
+      expect(Reflect.getPrototypeOf(exoticView)).toBe(Object.prototype);
+    });
+
+    /**
+     * F-C3 — pins the DISCLOSED limit, not a guard. The guard wraps
+     * callable entries; a callable nested inside a non-function entry is
+     * handed over by reference. Not live (the ONE chokepoint's map is
+     * functions only) and stated as such on `guardMongoMethods`. This test
+     * exists so the disclosure cannot drift silently: if a later change
+     * deep-wraps nested bags, this goes RED and the docstring must be
+     * updated with it.
+     */
+    it('F-C3 (DISCLOSED limit, not a guard): a non-function entry passes through BY REFERENCE, so a callable nested inside it is reachable raw — pinned so the disclosure on `guardMongoMethods` cannot drift', async () => {
+      const rawNested = jest.fn().mockResolvedValue(stranger);
+      const { adapter } = makeAdapter();
+      const bag = { inner: rawNested };
+      const view = adapter.guardMongoMethods({ bag, notAFunction: 42 });
+
+      expect(view.bag).toBe(bag);
+      expect(view.bag.inner).toBe(rawNested);
+      expect(view.notAFunction).toBe(42);
+      // The disclosed consequence, asserted rather than described.
+      expect(await view.bag.inner({ widget_id: undefined })).toBe(stranger);
+      expect(rawNested).toHaveBeenCalledTimes(1);
     });
 
     it('F-B5: inherited Object.prototype members are returned verbatim (hasOwnProperty is a boolean, constructor is Object), while a function on an EXOTIC prototype is still guarded', async () => {

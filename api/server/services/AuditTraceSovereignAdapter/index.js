@@ -67,19 +67,27 @@
  *     hand to Mongo" (`areMongoSafeArgs`, the same predicate
  *     `deferToMongo` applies). A domain that calls the context handle
  *     directly with a strippable filter gets the method's `emptyResult`
- *     and a logged warning. The raw Mongo function is not reachable from
- *     a domain through `ctx` by ANY surface `ctx` exposes — not by call,
- *     destructuring, spread, `Object.values`/`entries`/`assign`,
- *     `Reflect.get`, the prototype chain, a cached handle, the guard
- *     marker (symbol strip/forge), NOR by property-descriptor reflection
+ *     and a logged warning. A raw Mongo CALLABLE held as an entry of the
+ *     map is not reachable from a domain through `ctx` by any surface
+ *     `ctx` exposes — not by call, destructuring, spread,
+ *     `Object.values`/`entries`/`assign`, `Reflect.get`, the prototype
+ *     chain (reviewer F-C2), a cached handle, the guard marker (symbol
+ *     strip/forge), NOR by property-descriptor reflection
  *     (`Object.getOwnPropertyDescriptor(s)` / `Reflect.getOwnPropertyDescriptor`
  *     — reviewer F-B1, the one surface the first cut left open) — and the
  *     `ctx.mongoMethods` view is READ-ONLY (`set`/`defineProperty`/
  *     `deleteProperty`/`setPrototypeOf`/`preventExtensions` are refused),
- *     so a domain cannot swap a guarded entry for a raw one either. That
- *     enumeration is not prose: `index.spec.js` pins every surface with a
+ *     so a domain cannot swap a guarded entry for a raw one either.
+ *     **Scope of that claim, stated exactly (reviewer F-C1/F-C3):** it
+ *     covers CALLABLE entries — a callable NESTED inside a non-function
+ *     entry passes through by reference and is NOT guarded (disclosed on
+ *     `guardMongoMethods`; not live, the chokepoint's map is functions
+ *     only). And `index.spec.js` pins every surface above with a
  *     side-effect assertion (raw function NOT called, stranger row NOT
- *     returned), so the F6 mechanism cannot be re-implemented by hand.
+ *     returned), so the F6 mechanism cannot be re-implemented by hand —
+ *     but "pinned" is not the same claim as "independently falsifiable",
+ *     and `guardMongoMethods` labels each trap as one or the other rather
+ *     than asserting the stronger property for the whole set.
  *
  *  5. **Serve field data from the sovereign record already held (F6
  *     mitigation).** Every sovereign read returns the FULL mapped record —
@@ -683,11 +691,13 @@ class AuditTraceSovereignAdapter {
    * `mongoFn` is `guardMongoFn(mongoFn)` with this method's
    * `emptyResult`; `mongoMethods` is a lazy, read-only Proxy over the
    * chokepoint's full map that guards each callable on access — through
-   * `[[Get]]` AND `[[GetOwnProperty]]` (F-B1) — with the sibling's own
-   * declared `emptyResult` when it is a method of this domain. The raw
-   * functions are not reachable from an `impl` through any surface of
-   * `ctx` (see `guardMongoMethods` and the surface table in
-   * `index.spec.js`).
+   * `[[Get]]`, `[[GetOwnProperty]]` (F-B1) AND `[[GetPrototypeOf]]`
+   * (F-C2) — with the sibling's own declared `emptyResult` when it is a
+   * method of this domain. A raw map ENTRY is not reachable from an
+   * `impl` through any surface of `ctx`; a callable nested inside a
+   * non-function entry is (disclosed, F-C3). See `guardMongoMethods` for
+   * the per-trap falsifiability labels and the surface table in
+   * `index.spec.js`.
    *
    * @returns {Record<string, (token: string|null|undefined, mongoFn: Function, mongoMethods: Record<string, Function>) => Function>}
    */
@@ -716,14 +726,32 @@ class AuditTraceSovereignAdapter {
   /**
    * A lazy, READ-ONLY view over the chokepoint's Mongo method map in
    * which every callable is `guardMongoFn`-wrapped on access (F-A1).
-   * Non-function entries pass through; key enumeration is unchanged.
+   * Non-function entries pass through (see DISCLOSED, below); key
+   * enumeration is unchanged.
    *
-   * Closed surfaces (each one is a row in the `index.spec.js` table and
-   * goes RED on the side effect if its trap is removed):
-   *  - `get` — a plain/destructured/spread/`Object.values`/`Reflect.get`/
-   *    cached read yields the guarded callable.
-   *  - `getOwnPropertyDescriptor` (F-B1) — `Object.getOwnPropertyDescriptor(s)`
-   *    / `Reflect.getOwnPropertyDescriptor` would otherwise forward to the
+   * **How to read this enumeration (reviewer F-C1,
+   * `lesson-neuter-guards-individually-20260913`).** Every surface below
+   * is CLOSED, and every one is pinned by a side-effect assertion in
+   * `index.spec.js`. But "closed" and "independently falsifiable" are
+   * different claims, and only one of them survives a single-trap neuter.
+   * So each row is labelled:
+   *
+   *  - **PINNED** — removing THIS trap alone turns a named test RED on the
+   *    side effect (the raw function is called / the stranger row comes
+   *    back). Proven one trap at a time, restoring byte-identically
+   *    between runs — never in aggregate.
+   *  - **REDUNDANT-BUT-RETAINED** — the surface is closed, but a SIBLING
+   *    trap catches the case first, so removing this trap alone leaves the
+   *    suite GREEN. Kept as defence-in-depth. The sibling is named. This
+   *    row is NOT claimed to be independently falsifiable, and no test
+   *    asserts that it is.
+   *
+   * Closed surfaces:
+   *  - `get` — **PINNED.** A plain/destructured/spread/`Object.values`/
+   *    `Reflect.get`/cached read yields the guarded callable.
+   *  - `getOwnPropertyDescriptor` (F-B1) — **PINNED.**
+   *    `Object.getOwnPropertyDescriptor(s)` /
+   *    `Reflect.getOwnPropertyDescriptor` would otherwise forward to the
    *    target and hand back the UNWRAPPED function in `.value`; the trap
    *    returns a data descriptor whose `value` is the guarded callable.
    *    The chokepoint map's properties are ordinary configurable data
@@ -731,17 +759,47 @@ class AuditTraceSovereignAdapter {
    *    frozen, the engine would throw a `TypeError` here rather than let
    *    the trap report a value that differs from a non-configurable,
    *    non-writable original — fail-closed by construction, never a leak.
-   *  - `set` / `defineProperty` / `deleteProperty` / `setPrototypeOf` /
-   *    `preventExtensions` — refused (`false`; `Object.defineProperty`
-   *    and strict-mode assignment throw), so a domain cannot replace a
-   *    sibling's guarded entry with a raw function on the SHARED map,
-   *    nor mutate the map's shape for every other domain.
+   *  - `getPrototypeOf` (F-C2) — **PINNED.** `Object.getPrototypeOf(view)`
+   *    would otherwise forward to the target; against a target whose
+   *    prototype carries callables (`Object.create({leak})`, a class
+   *    instance) the returned prototype hands back the UNWRAPPED function.
+   *    The trap reports `Object.prototype`, the prototype a plain map has.
+   *  - `defineProperty` — **PINNED**, and it is the TERMINAL refuser of
+   *    the whole write side: `[[Set]]`, `Object.defineProperty`,
+   *    `Object.defineProperties` and strict-mode assignment all end at
+   *    `[[DefineOwnProperty]]`.
+   *  - `deleteProperty` / `setPrototypeOf` / `preventExtensions` —
+   *    **PINNED**, one `index.spec.js` assertion each.
+   *  - `set` — **REDUNDANT-BUT-RETAINED; sibling = `defineProperty`.**
+   *    Assignment to the view IS refused, but not by this trap: with no
+   *    `set` trap, `[[Set]]` falls to `OrdinarySetWithOwnDescriptor` with
+   *    `Receiver` = the proxy, which consults the `getOwnPropertyDescriptor`
+   *    trap above and then calls `Receiver.[[DefineOwnProperty]]` — i.e.
+   *    `defineProperty: refuse`. So removing `set: refuse` alone leaves
+   *    the suite GREEN; it is unreachable as a control. Retained because
+   *    it refuses one `[[DefineOwnProperty]]` hop earlier and keeps the
+   *    write side closed should `defineProperty` ever be narrowed. The
+   *    protection itself (a domain cannot swap a guarded entry for a raw
+   *    one) is pinned behaviourally; the PAIR goes RED when both traps
+   *    are removed together. Exactly the disclosure the undefined-key
+   *    `isMongoSafeFilter`/`classifyFilter` pair carries.
    *  - F-B5 — inherited `Object.prototype` members (`hasOwnProperty`,
    *    `toString`, `constructor`, ...) are returned verbatim instead of
    *    being `async`-wrapped: `ctx.mongoMethods.hasOwnProperty('x')` is a
-   *    boolean, not a truthy Promise. Only genuine `Object.prototype`
-   *    members get this pass-through; anything else that is not an own
-   *    key (an exotic prototype) is still guarded.
+   *    boolean, not a truthy Promise. **PINNED.** Only genuine
+   *    `Object.prototype` members get this pass-through; anything else
+   *    that is not an own key (an exotic prototype) is still guarded.
+   *
+   * **DISCLOSED (F-C3) — non-function entries pass through BY REFERENCE,
+   * unguarded and not deep-wrapped.** The guard wraps callables; an entry
+   * that is an object (`{bag: {inner: rawFn}}`) is handed to the domain as
+   * itself, so a callable NESTED inside it is reachable raw. Not live: the
+   * ONE chokepoint (`api/models/index.js`) passes `createMethods(...)`,
+   * whose every entry is a function, and a domain cannot choose the map's
+   * shape. Stated here rather than silently guarded because deep-wrapping
+   * an arbitrary bag is a behaviour change no spec asked for. The
+   * closure claims elsewhere in this file are scoped to CALLABLE entries
+   * accordingly.
    *
    * @param {Record<string, unknown>} mongoMethods
    * @returns {Record<string, unknown>}
@@ -772,6 +830,18 @@ class AuditTraceSovereignAdapter {
           configurable: desc.configurable === true,
         };
       },
+      // F-C2 — the prototype chain is a READ surface too: without this trap
+      // `Object.getPrototypeOf(view)` forwards to the target and hands back
+      // the target's real prototype, whose members are UNGUARDED. The view
+      // reports the prototype a plain map has. Safe against the Proxy
+      // invariant: the trap result must equal the target's own prototype
+      // only when the target is non-extensible, and a frozen/sealed map's
+      // prototype IS `Object.prototype` here (the chokepoint builds an
+      // object literal), so this never throws where the untrapped form
+      // would not.
+      getPrototypeOf: () => Object.prototype,
+      // `defineProperty` is the TERMINAL refuser of every write surface,
+      // `set` included (see the docstring's falsifiability breakdown).
       set: refuse,
       defineProperty: refuse,
       deleteProperty: refuse,
