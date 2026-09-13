@@ -685,6 +685,119 @@ describe('AuditTraceSovereignAdapter — the base owns every invariant, proven o
   });
 
   // ────────────────────────────────────────────────────────────────────────
+  describe('F-A1 — the escape hatch is CLOSED: a HOSTILE impl reaching Mongo through ctx is guarded (NEUTER: hand impl the raw mongoFn/mongoMethods in buildBinders → the stranger row comes back: RED)', () => {
+    /** A domain that IGNORES every base primitive and calls the ctx handle directly — the F6 mechanism by hand. */
+    const hostileMethods = {
+      rawRead: {
+        kind: 'read',
+        arity: 1,
+        emptyResult: [],
+        impl(args, ctx) {
+          return ctx.mongoFn(args[0]);
+        },
+      },
+      rawSibling: {
+        kind: 'read',
+        arity: 1,
+        emptyResult: [],
+        impl(args, ctx) {
+          return ctx.mongoMethods.other(args[0]);
+        },
+      },
+      rawDeclaredSibling: {
+        kind: 'read',
+        arity: 1,
+        impl(args, ctx) {
+          return ctx.mongoMethods.sweepWidgets(args[0]);
+        },
+      },
+      sweepWidgets: {
+        kind: 'deferred',
+        arity: 1,
+        emptyResult: null,
+        impl(args, ctx) {
+          return this.deferToMongo(ctx, args);
+        },
+      },
+    };
+    const stranger = [{ widget_id: 'ANOTHER-USERS-ROW', text: 'secret' }];
+
+    it('ctx.mongoFn({_id: undefined}) from a hostile impl → the declared emptyResult, the raw Mongo function NEVER called, the stranger row NOT returned, warning names the method', async () => {
+      const { adapter } = makeAdapter({ methods: hostileMethods });
+      const mongoFn = jest.fn().mockResolvedValue(stranger);
+      const bound = adapter.buildBinders().rawRead('tok', mongoFn, {});
+
+      const result = await bound({ _id: undefined });
+
+      expect(result).toEqual([]);
+      expect(result).not.toEqual(stranger);
+      expect(mongoFn).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/\[AuditTraceSovereignAdapter:widgets\] rawRead short-circuited/),
+      );
+    });
+
+    it('ctx.mongoFn with a SAFE filter forwards it BYTE-IDENTICAL (same object reference) and returns what Mongo returned — behaviour preserved', async () => {
+      const { adapter } = makeAdapter({ methods: hostileMethods });
+      const mongoFn = jest.fn().mockResolvedValue(stranger);
+      const filter = { widget_id: 'w1', color: 'red' };
+      const result = await adapter.buildBinders().rawRead('tok', mongoFn, {})(filter);
+      expect(mongoFn).toHaveBeenCalledTimes(1);
+      expect(mongoFn.mock.calls[0][0]).toBe(filter);
+      expect(result).toBe(stranger);
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('every callable reachable via ctx.mongoMethods is guarded too: an undeclared sibling yields undefined, a declared sibling yields ITS emptyResult, neither raw function is called; safe args still forward', async () => {
+      const { adapter } = makeAdapter({ methods: hostileMethods });
+      const other = jest.fn().mockResolvedValue(stranger);
+      const sweepWidgets = jest.fn().mockResolvedValue(stranger);
+      const binders = adapter.buildBinders();
+      const methods = { other, sweepWidgets, notAFunction: 42 };
+
+      expect(await binders.rawSibling('tok', jest.fn(), methods)({ widget_id: undefined })).toBe(
+        undefined,
+      );
+      expect(other).not.toHaveBeenCalled();
+      expect(
+        await binders.rawDeclaredSibling('tok', jest.fn(), methods)({ widget_id: undefined }),
+      ).toBeNull();
+      expect(sweepWidgets).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledTimes(2);
+
+      const safe = { widget_id: 'w1' };
+      expect(await binders.rawSibling('tok', jest.fn(), methods)(safe)).toBe(stranger);
+      expect(other.mock.calls[0][0]).toBe(safe);
+      // Non-function entries and key enumeration pass through untouched.
+      expect(adapter.guardMongoMethods(methods).notAFunction).toBe(42);
+      expect(Object.keys(adapter.guardMongoMethods(methods))).toEqual(Object.keys(methods));
+    });
+
+    it('ONE definition of "safe to hand to Mongo": areMongoSafeArgs has exactly one call site in the base, guardMongoFn is idempotent, and deferToMongo over a pre-guarded ctx warns exactly ONCE', async () => {
+      const src = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8');
+      expect(src.match(/areMongoSafeArgs\(/g)).toHaveLength(1);
+
+      const { adapter } = makeAdapter({ methods: hostileMethods });
+      const raw = jest.fn();
+      const once = adapter.guardMongoFn(raw, { name: 'x', emptyResult: null });
+      expect(adapter.guardMongoFn(once, { name: 'x', emptyResult: null })).toBe(once);
+      expect(once).not.toBe(raw);
+      expect(adapter.guardMongoFn(undefined)).toBeUndefined();
+      expect(adapter.guardMongoFn('not-a-fn')).toBe('not-a-fn');
+
+      // Through a binder, a deferred impl composes deferToMongo on an
+      // ALREADY-guarded ctx.mongoFn: one guard, one warning, emptyResult.
+      const mongoFn = jest.fn().mockResolvedValue(stranger);
+      expect(
+        await adapter.buildBinders().sweepWidgets('tok', mongoFn, {})({ widget_id: undefined }),
+      ).toBeNull();
+      expect(mongoFn).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sweepWidgets'));
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
   describe('config validation — a domain cannot instantiate an incomplete base', () => {
     it('rejects a missing required field, an empty methods map, an unknown kind, a missing impl, a bad arity', () => {
       const good = () => makeAdapter();

@@ -20,9 +20,14 @@
  * predicate; the v2 fix-round leaked another user's text via
  * `{_id: undefined}` (F6) and orphaned the sovereign row on own delete
  * (F7). Each is now structurally impossible here because this module
- * cannot express them: it has no hand-rolled path to Mongo at all —
- * `ctx.mongoFn` is only ever reached THROUGH a base primitive's
- * `fallback`, after the base has resolved the caller's own rows first.
+ * cannot express them: it has no raw path to Mongo at all — the
+ * `ctx.mongoFn` / `ctx.mongoMethods` handles it receives are PRE-WRAPPED
+ * by the base in the ONE Mongo argument guard (F-A1, base invariant 4),
+ * so even the one direct call below (`deleteFiles`' `ctx.mongoFn(null,
+ * user)`) cannot hand Mongo a strippable filter. A consequence the
+ * domain must own: any DATA bag it forwards to Mongo must not carry a
+ * present-but-`undefined` key either (`usageData` below) — the guard
+ * does not distinguish a data bag from a filter, by design.
  *
  * ============================================================
  * HOW EACH PRIOR REJECT IS CLOSED (regression-tested in `index.spec.js`)
@@ -102,11 +107,17 @@
  *  1. **Explicit-sharing degraded while the flag is ON, until its own
  *     WU — scoped to genuinely-not-mine reads only.** The OWNER's own
  *     preview/download/agent-files/delete WORK (sovereign-first by id,
- *     whatever the filter's owner key). ONLY a sharee's cross-user read
- *     (`share.js`, an agent-tool-resource lookup for another user's
- *     file, a non-owner's agent-shared preview) falls to Mongo and,
- *     once the owner's metadata is 100% sovereign, finds nothing. Do NOT
- *     flip `AUDITTRACE_MEMORY_BACKEND=sovereign` for files in production
+ *     whatever the filter's owner key). ONLY a sharee's cross-user
+ *     ID-SHAPED read (`share.js`, an agent-tool-resource lookup for
+ *     another user's file, a non-owner's agent-shared preview) falls to
+ *     Mongo and, once the owner's metadata is 100% sovereign, finds
+ *     nothing. The OWN-LIST shape is different (F-A3): a `{user: <id>}`
+ *     read with no id key is served from the sovereign LIST endpoint
+ *     ONLY and NEVER falls through to Mongo — `{user: <someone else>}`
+ *     returns `[]`, not that user's legacy rows (no live cross-user
+ *     own-list site exists: `UserController.js:131` and `files.js:66`
+ *     both pass `req.user.id`). Do NOT flip
+ *     `AUDITTRACE_MEMORY_BACKEND=sovereign` for files in production
  *     until the explicit-sharing WU lands, or accept this interim
  *     sharee-only degradation.
  *  2. **TTL/retention is not ported.** A file created under the flag
@@ -135,6 +146,7 @@
  * `SOVEREIGN_METHOD_BINDERS` below into `ALL_SOVEREIGN_METHOD_BINDERS`.
  */
 
+const { logger } = require('@librechat/data-schemas');
 const { AuditTraceSovereignAdapter } = require('../AuditTraceSovereignAdapter');
 const { SovereignMemoryError } = require('../AuditTraceMemory/errors');
 const { callConsoleFileRecordsProxy } = require('./client');
@@ -161,6 +173,27 @@ const usageMerge = (inc) => (existing) => ({
   temp_file_id: undefined,
 });
 
+/**
+ * The Mongo `updateFileUsage` data bag restated from ONLY its documented
+ * keys that are actually defined (`file_id`, `inc?`, `user?`,
+ * `tenantId?`). A live caller passes `tenantId: req.user?.tenantId`
+ * (`services/Files/process.js:1143` — `undefined` on a single-tenant
+ * deployment) and `updateFilesUsage` fans out `options.user`/`tenantId`
+ * per id; the base's ONE Mongo argument guard (F-A1) refuses any object
+ * carrying a present-but-`undefined` key, so the domain states its
+ * Mongo-bound arguments explicitly — byte-for-byte what Mongo's own
+ * destructuring (`const {file_id, inc = 1, user, tenantId} = data`) sees.
+ *
+ * @param {Record<string, unknown>} src
+ * @returns {{file_id: unknown, inc?: number, user?: string, tenantId?: string|null}}
+ */
+const usageData = (src) => ({
+  file_id: src.file_id,
+  ...(src.inc !== undefined && { inc: src.inc }),
+  ...(src.user !== undefined && { user: src.user }),
+  ...(src.tenantId !== undefined && { tenantId: src.tenantId }),
+});
+
 class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
   constructor() {
     super({
@@ -185,9 +218,14 @@ class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
         // Mongo: getFiles(filter, sortOptions?, selectFields?) — read-by-filter.
         // `sortOptions`/`selectFields` are accepted for signature parity:
         // the sovereign result is newest-first and always the full record.
+        // `emptyResult: []` is what the guarded `ctx.mongoFn` resolves to
+        // if a strippable filter were ever handed to it directly (F-A1) —
+        // Mongo's own empty shape, so `const [x] = await getFiles(...)`
+        // callers never see `undefined`.
         getFiles: {
           kind: 'read',
           arity: 3,
+          emptyResult: [],
           impl([filter, sortOptions, selectFields], ctx) {
             return this.readByFilter(filter, {
               ...ctx,
@@ -233,6 +271,8 @@ class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
         },
         // Mongo: updateFileUsage({file_id, inc?, user?, tenantId?}) —
         // write-by-id. NO `data.user` gate (F7): sovereign-first by id.
+        // The Mongo fallback receives `usageData(src)` — the same data
+        // with no present-but-undefined key (F-A1; see `usageData`).
         updateFileUsage: {
           kind: 'write',
           arity: 1,
@@ -245,7 +285,7 @@ class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
               {
                 ...ctx,
                 merge: usageMerge(inc),
-                fallback: () => ctx.mongoFn(data),
+                fallback: () => ctx.mongoFn(usageData(src)),
               },
             );
           },
@@ -286,10 +326,27 @@ class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
           },
         },
         // Mongo: deleteFiles(file_ids, user?) — write-by-ids (F7). The
-        // `(null, user)` "delete all mine" shape (`UserController.js`'s
-        // account deletion) sweeps BOTH stores: every sovereign own row
-        // AND Mongo's own `{user}` deleteMany — belt-and-suspenders on a
-        // retention-sensitive path.
+        // `(null, user)` "delete all mine" shape (`UserController.js:454`'s
+        // account deletion, `const { user } = req` — the SOLE live caller)
+        // sweeps BOTH stores: every sovereign own row AND Mongo's own
+        // `{user}` deleteMany — belt-and-suspenders on a retention-
+        // sensitive path.
+        //
+        // F-A2 (own-list guard): the sovereign sweep can ONLY ever be the
+        // token holder's own-list (RLS), whatever `user` names. So the
+        // sweep runs ONLY when `user` IS the authenticated request
+        // subject (the ONE ALS `sub`, `req.user.id`). A `(null, <someone
+        // else>)` call — an admin-initiated account deletion, should one
+        // ever be added — must NOT wipe the ADMIN's own files: it is
+        // fail-closed on the sovereign side (nothing listed, nothing
+        // deleted, a warning logged) and deferred to Mongo for the named
+        // user only — the same "genuinely not mine → Mongo, never my
+        // rows" boundary every cross-user read/write in this adapter
+        // uses. Outside a request (no ALS subject — only reachable with
+        // an explicitly bound token, i.e. tests; in production the token
+        // and the subject are populated together, `requireJwtAuth.js:203`)
+        // the sweep proceeds under the token's own RLS scope, mirroring
+        // the base's invariant-6 fallback.
         deleteFiles: {
           kind: 'write',
           arity: 2,
@@ -301,18 +358,29 @@ class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
               });
             }
             const token = this.requireToken(ctx.token);
-            const own = await this.listOwn(token);
-            const ownIds = own.map((item) => item.file_id).filter(isId);
-            const sovereign = await this.deleteByIds(ownIds, {
-              token,
-              fallback: async () => ({ deletedCount: 0 }),
-            });
+            const sub = this.currentSub();
+            let sovereignCount = 0;
+            if (sub != null && String(user) !== String(sub)) {
+              logger.warn(
+                '[AuditTraceFiles] deleteFiles(null, user) named a user other than the request ' +
+                  "subject — the caller's sovereign own-list is NOT swept (fail-closed, F-A2); " +
+                  'only the Mongo path runs for the named user',
+              );
+            } else {
+              const own = await this.listOwn(token);
+              const ownIds = own.map((item) => item.file_id).filter(isId);
+              const sovereign = await this.deleteByIds(ownIds, {
+                token,
+                fallback: async () => ({ deletedCount: 0 }),
+              });
+              sovereignCount = sovereign.deletedCount;
+            }
             const mongoResult = await ctx.mongoFn(null, user);
             const mongoCount =
               mongoResult && typeof mongoResult.deletedCount === 'number'
                 ? mongoResult.deletedCount
                 : 0;
-            return { deletedCount: sovereign.deletedCount + mongoCount };
+            return { deletedCount: sovereignCount + mongoCount };
           },
         },
       },

@@ -59,8 +59,18 @@
  *     `null`, `deleteByIds` → `{deletedCount: 0}`, `deferToMongo` → the
  *     method's declared empty result). Mongoose would strip the key and
  *     widen the query to the whole collection; this base refuses.
+ *     **The escape hatch is CLOSED, not merely unattractive (reviewer
+ *     F-A1, `lesson-abstraction-must-close-the-escape-hatch-20260913`):**
+ *     the `ctx.mongoFn` and every callable reachable through
+ *     `ctx.mongoMethods` that `buildBinders` hands a domain `impl` are
+ *     PRE-WRAPPED in `guardMongoFn` — the ONE definition of "safe to
+ *     hand to Mongo" (`areMongoSafeArgs`, the same predicate
+ *     `deferToMongo` applies). A domain that calls the context handle
+ *     directly with a strippable filter gets the method's `emptyResult`
+ *     and a logged warning; the raw Mongo function is unreachable from a
+ *     domain, so the F6 mechanism cannot be re-implemented by hand.
  *
- *  5. **Serve field data from the sovereign record already held (F6
+ *  5.**Serve field data from the sovereign record already held (F6
  *     mitigation).** Every sovereign read returns the FULL mapped record —
  *     a Mongo `select` projection is accepted for signature parity and
  *     ignored (a superset, never a security concern), so a route needing
@@ -117,9 +127,12 @@
  * (`readByFilter`, `readOne`, `create`, `updateById`, `deleteById`,
  * `deleteByIds`, `listOwn`, `deferToMongo`). `buildBinders()` turns that
  * map into the fixed-arity `(token, mongoFn, mongoMethods) => (...)`
- * binders the chokepoint merges. Nothing about the read/fall-through/
- * write logic is written per domain. `../AuditTraceFiles` is the FIRST
- * and hardest adopter — the reference.
+ * binders the chokepoint merges. The `ctx.mongoFn` / `ctx.mongoMethods`
+ * handles an `impl` receives are NOT the raw Mongo functions: they are
+ * pre-wrapped in `guardMongoFn` (invariant 4, F-A1), so even a direct
+ * call from an `impl` inherits the undefined-key guard. Nothing about
+ * the read/fall-through/write logic is written per domain.
+ * `../AuditTraceFiles` is the FIRST and hardest adopter — the reference.
  */
 
 const { logger } = require('@librechat/data-schemas');
@@ -140,6 +153,8 @@ const {
 const METHOD_KINDS = new Set(['read', 'write', 'deferred']);
 const DEFAULT_LIST_PAGE_SIZE = 100;
 const DEFAULT_LIST_MAX_PAGES = 50;
+/** Marks a Mongo callable ALREADY wrapped by `guardMongoFn` (idempotence). */
+const MONGO_GUARDED = Symbol('AuditTraceSovereignAdapter.mongoGuarded');
 
 /** @param {unknown} error @returns {boolean} */
 function isNotFound(error) {
@@ -590,27 +605,57 @@ class AuditTraceSovereignAdapter {
     return { deletedCount };
   }
 
-  // ── Deferred methods (invariant 4 for opaque args) ───────────────────────
+  // ── The ONE Mongo argument guard (invariant 4 for opaque args; F-A1) ─────
 
   /**
-   * Forwards a DEFERRED (disclosed Mongo-native) call to the raw Mongo
-   * function — unless any plain-object argument carries a
-   * present-but-`undefined` key, in which case the method's declared
-   * `emptyResult` is returned and Mongo is NOT consulted.
+   * THE ONE definition of "safe to hand to Mongo". Returns `mongoFn`
+   * wrapped so that a call whose plain-object arguments carry a
+   * present-but-`undefined` key NEVER reaches Mongo: it is logged and
+   * resolves to `emptyResult` instead (`areMongoSafeArgs` — this is the
+   * only call site of that predicate; `deferToMongo` and the `ctx`
+   * handles `buildBinders` emits both go through here, so there is no
+   * second, divergent rule). Closing the escape hatch (reviewer F-A1):
+   * a domain `impl` is handed ONLY guarded callables, so calling
+   * `ctx.mongoFn(filter)` directly with `{_id: undefined}` cannot
+   * reproduce the F6 whole-collection read. Idempotent — an
+   * already-guarded callable is returned as-is (no double wrap, one
+   * warning); a non-function passes through untouched.
    *
-   * @param {{mongoFn: Function, emptyResult?: unknown}} ctx
+   * @param {Function|unknown} mongoFn
+   * @param {{name?: string, emptyResult?: unknown}} [meta]
+   * @returns {Function|unknown}
+   */
+  guardMongoFn(mongoFn, meta = {}) {
+    if (typeof mongoFn !== 'function' || mongoFn[MONGO_GUARDED]) {
+      return mongoFn;
+    }
+    const { name = 'deferToMongo', emptyResult } = meta;
+    const guarded = async (...args) => {
+      if (!areMongoSafeArgs(args)) {
+        logger.warn(
+          `[AuditTraceSovereignAdapter:${this.domain}] ${name} short-circuited an argument ` +
+            'with an undefined-valued key — Mongo NOT consulted',
+        );
+        return emptyResult;
+      }
+      return mongoFn(...args);
+    };
+    guarded[MONGO_GUARDED] = true;
+    return guarded;
+  }
+
+  /**
+   * Forwards a DEFERRED (disclosed Mongo-native) call to the Mongo
+   * function through `guardMongoFn`: an argument with a
+   * present-but-`undefined` key yields the method's declared
+   * `emptyResult` and Mongo is NOT consulted.
+   *
+   * @param {{mongoFn: Function, emptyResult?: unknown, name?: string}} ctx
    * @param {unknown[]} args
    * @returns {Promise<unknown>}
    */
   async deferToMongo(ctx, args) {
-    if (!areMongoSafeArgs(args)) {
-      logger.warn(
-        `[AuditTraceSovereignAdapter:${this.domain}] deferToMongo short-circuited an argument ` +
-          'with an undefined-valued key — Mongo NOT consulted',
-      );
-      return ctx.emptyResult;
-    }
-    return ctx.mongoFn(...args);
+    return this.guardMongoFn(ctx.mongoFn, ctx)(...args);
   }
 
   // ── Binder registration (invariant 1) ────────────────────────────────────
@@ -622,6 +667,13 @@ class AuditTraceSovereignAdapter {
    * `ctx = {token, mongoFn, mongoMethods, emptyResult, name}`; a `write`
    * or `read` impl composes the base primitives above, a `deferred` impl
    * composes `deferToMongo`.
+   *
+   * **`ctx.mongoFn` and `ctx.mongoMethods` are PRE-WRAPPED (F-A1).**
+   * `mongoFn` is `guardMongoFn(mongoFn)` with this method's
+   * `emptyResult`; `mongoMethods` is a lazy Proxy over the chokepoint's
+   * full map that guards each callable on access (with the sibling's
+   * own declared `emptyResult` when it is a method of this domain). The
+   * raw functions are never reachable from an `impl`.
    *
    * @returns {Record<string, (token: string|null|undefined, mongoFn: Function, mongoMethods: Record<string, Function>) => Function>}
    */
@@ -638,13 +690,31 @@ class AuditTraceSovereignAdapter {
             name,
             kind: spec.kind,
             token,
-            mongoFn,
-            mongoMethods: mongoMethods || {},
+            mongoFn: this.guardMongoFn(mongoFn, { name, emptyResult: spec.emptyResult }),
+            mongoMethods: this.guardMongoMethods(mongoMethods || {}),
             emptyResult: spec.emptyResult,
           }),
         );
     }
     return binders;
+  }
+
+  /**
+   * A lazy, read-only view over the chokepoint's Mongo method map in
+   * which every callable is `guardMongoFn`-wrapped on access (F-A1).
+   * Non-function entries pass through; key enumeration is unchanged.
+   *
+   * @param {Record<string, unknown>} mongoMethods
+   * @returns {Record<string, unknown>}
+   */
+  guardMongoMethods(mongoMethods) {
+    return new Proxy(mongoMethods, {
+      get: (target, key) =>
+        this.guardMongoFn(target[key], {
+          name: String(key),
+          emptyResult: this.methods[key] ? this.methods[key].emptyResult : undefined,
+        }),
+    });
   }
 }
 
