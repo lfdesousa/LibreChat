@@ -26,8 +26,26 @@
  * so even the one direct call below (`deleteFiles`' `ctx.mongoFn(null,
  * user)`) cannot hand Mongo a strippable filter. A consequence the
  * domain must own: any DATA bag it forwards to Mongo must not carry a
- * present-but-`undefined` key either (`usageData` below) — the guard
- * does not distinguish a data bag from a filter, by design.
+ * present-but-`undefined` key either (`usageData` and `mongoUpdateData`
+ * below) — the guard does not distinguish a data bag from a filter, by
+ * design. Two live shapes needed restating, both the single-tenant
+ * `tenantId: req.user.tenantId` (= `undefined`) idiom:
+ * `updateFileUsage`/`updateFilesUsage` (`services/Files/process.js:1143`,
+ * `buildEndpointOption.js:184`, `agents/initialize.ts:1146`,
+ * `steering/request.ts:324`) and the code-execution harvest's CAS
+ * `updateFile(fileData, {$or: [...]})` (`Files/Code/process.js:671`,
+ * reviewer F-B2). Every other live argument that the base can forward
+ * to Mongo is one of: a literal, an id / id-set, the request owner's
+ * id, a conditionally-spread `tenantId` (`!= null &&` / `if (tenantId)`),
+ * an `instanceof Date`-checked `updatedAt` (the preview-sweep CAS
+ * filter), a string projection (`'-text'`), or a `$or` array — none a
+ * present-but-`undefined` top-level key. The ONE remaining shape that
+ * can be, `files.js:586`'s `{_id: file._id}`, is the F6 mechanism and
+ * is short-circuited to `[]` by the base ON PURPOSE. `createFile` is
+ * sovereign-only (its data bag never reaches Mongo) and the model's
+ * `deleteFile(file_id)` has no live caller (every `deleteFile(req, …)`
+ * in the tree is a storage strategy's). The build record carries the
+ * per-site table with the grep that produced it.
  *
  * ============================================================
  * HOW EACH PRIOR REJECT IS CLOSED (regression-tested in `index.spec.js`)
@@ -126,13 +144,29 @@
  *     file's `filepath` is the last signed URL known at write time.
  *  4. **The `{user}` own-list is bounded at 5000 files/user** (the
  *     base's declared ceiling; a warning is logged when hit).
- *  5. **`updateFile` with an `extraFilter` (the deferred-preview CAS)
+ *  5. **`updateFile` with an `extraFilter` (the deferred-preview CAS
+ *     AND the code-execution harvest's commit, `Code/process.js:671`)
  *     is Mongo-native**: for a sovereign-only row it returns `null`
- *     (the same "conditional filter excluded it" contract) — the
- *     preview-status CAS does not advance a sovereign row.
+ *     (the same "conditional filter excluded it" contract) — the CAS
+ *     does not advance a sovereign row. The DATA bag is forwarded with
+ *     its present-but-`undefined` top-level keys removed
+ *     (`mongoUpdateData`) so a single-tenant `tenantId: undefined` does
+ *     not short-circuit the commit; the `extraFilter` is forwarded
+ *     untouched and a strippable one is still refused by the base.
  *  6. **A residual `getFiles` shape naming neither `file_id`/`_id` nor
  *     `user` (none exists at a live chokepointed site today) defers to
  *     Mongo unchanged and cannot see sovereign-only rows.**
+ *  7. **Right-to-erasure completeness for a future ADMIN-initiated
+ *     deletion (reviewer F-B3, named, not closed).** `deleteFiles(null,
+ *     <other user>)` is fail-closed on the sovereign side (F-A2): the
+ *     NAMED user's sovereign rows are NOT deleted (only the token
+ *     holder's could be, by RLS) and the call returns Mongo's count —
+ *     a success-shaped `{deletedCount: 0}` once that user's rows are
+ *     100% sovereign. No live caller is admin-shaped today
+ *     (`UserController.js:454` passes `req.user.id`); an admin-scoped
+ *     sovereign delete API is a later WU. Until it lands, an operator
+ *     erasing another user's data must do so under THAT user's token
+ *     (or directly in the sovereign store), never via this method.
  *
  * **S3 isolation (verified, unchanged):** `getS3Key` namespaces every
  * object key by the uploading `req.user.id`; `deleteFileFromS3` parses
@@ -194,6 +228,38 @@ const usageData = (src) => ({
   ...(src.tenantId !== undefined && { tenantId: src.tenantId }),
 });
 
+/**
+ * The Mongo `updateFile(data, extraFilter?)` DATA bag with its
+ * present-but-`undefined` TOP-LEVEL keys removed — or the SAME object
+ * reference when it carries none (byte-identical forwarding, the F-A1
+ * behaviour-preservation contract).
+ *
+ * Why (reviewer F-B2): the background code-execution harvest commits
+ * through the CAS shape `updateFile(fileData, {$or: [...]})`
+ * (`services/Files/Code/process.js:671`) where `fileData` carries
+ * `tenantId: req.user.tenantId` — `undefined` on a single-tenant
+ * deployment. The base's ONE Mongo argument guard (F-A1) refuses any
+ * plain-object argument with an undefined-valued key, so without this
+ * restatement that commit short-circuited to `null`, `commitCodeFile`
+ * returned `false`, and the generated file was silently dropped behind
+ * the misleading "a newer run owns this filename" warning. Dropping the
+ * undefined keys is byte-for-byte what Mongo writes anyway: Mongoose
+ * 8.24.1 casts `$set: {tenantId: undefined, status: 'ready'}` to
+ * `$set: {status: 'ready'}` (verified with `Query#_castUpdate`) — an
+ * undefined-valued key never reaches the server. ONLY the data bag is
+ * restated; `extraFilter` is forwarded untouched, so a strippable
+ * FILTER is still refused by the base (that is the F6 mechanism).
+ *
+ * @param {Record<string, unknown>} src
+ * @returns {Record<string, unknown>}
+ */
+const mongoUpdateData = (src) => {
+  if (!Object.values(src).some((value) => value === undefined)) {
+    return src;
+  }
+  return Object.fromEntries(Object.entries(src).filter(([, value]) => value !== undefined));
+};
+
 class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
   constructor() {
     super({
@@ -250,7 +316,10 @@ class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
           },
         },
         // Mongo: updateFile(data, extraFilter?) — write-by-id; the CAS
-        // shape is deferred (DISCLOSED CONSEQUENCE §5).
+        // shape is deferred (DISCLOSED CONSEQUENCE §5). Every Mongo-bound
+        // copy of `data` goes through `mongoUpdateData` (F-B2): the
+        // sovereign delta is the caller's object as-is (invariant 8's
+        // fetch-then-merge; the HTTP body is JSON, which omits undefined).
         updateFile: {
           kind: 'write',
           arity: 2,
@@ -260,12 +329,13 @@ class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
             if (!isId(src.file_id)) {
               return null;
             }
+            const mongoData = mongoUpdateData(src);
             if (extraFilter) {
-              return this.deferToMongo(ctx, [data, extraFilter]);
+              return this.deferToMongo(ctx, [mongoData, extraFilter]);
             }
             return this.updateById(src.file_id, src, {
               ...ctx,
-              fallback: () => ctx.mongoFn(data, extraFilter),
+              fallback: () => ctx.mongoFn(mongoData, extraFilter),
             });
           },
         },

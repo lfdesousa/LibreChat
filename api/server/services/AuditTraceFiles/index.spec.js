@@ -675,6 +675,82 @@ describe('AuditTraceFiles — the files domain ON the sovereign adapter base', (
       await handle(safe, null, {});
       expect(mongoFn.mock.calls[0][0]).toBe(safe);
     });
+
+    it('F-B2: Code/process.js:671 shape — the background harvest commit updateFile({...fileData, tenantId: undefined}, {$or: [...]}) REACHES Mongo with the data minus the undefined key and the extraFilter byte-identical, and returns the committed row (NEUTER: `mongoUpdateData` → identity → null, Mongo never called: RED)', async () => {
+      const committed = { file_id: 'code-1', filename: 'out.png', status: 'ready' };
+      const mongoFn = jest.fn().mockResolvedValueOnce(committed);
+      const fileData = {
+        file_id: 'code-1',
+        filename: 'out.png',
+        conversationId: 'c1',
+        user: 'u1',
+        tenantId: undefined,
+        metadata: { sourceDispatchedAt: 1000 },
+      };
+      const cas = {
+        $or: [
+          { 'metadata.sourceDispatchedAt': { $exists: false } },
+          { 'metadata.sourceDispatchedAt': { $lte: 1000 } },
+        ],
+      };
+
+      const result = await bind('updateFile', mongoFn)(fileData, cas);
+
+      expect(result).toBe(committed);
+      expect(mongoFn).toHaveBeenCalledTimes(1);
+      const [sentData, sentFilter] = mongoFn.mock.calls[0];
+      expect(Object.keys(sentData)).toEqual([
+        'file_id',
+        'filename',
+        'conversationId',
+        'user',
+        'metadata',
+      ]);
+      expect(sentData).toEqual({
+        file_id: 'code-1',
+        filename: 'out.png',
+        conversationId: 'c1',
+        user: 'u1',
+        metadata: { sourceDispatchedAt: 1000 },
+      });
+      expect(sentFilter).toBe(cas);
+      expect(callConsoleFileRecordsProxy).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('F-B2: the same restatement on the PLAIN updateFile fallback for a legacy row; a data bag with NO undefined key is forwarded as the SAME object reference; and a strippable extraFilter is STILL refused (the F6 mechanism is a filter, not a data bag)', async () => {
+      // legacy row, undefined key in the data bag → Mongo reached, key dropped
+      callConsoleFileRecordsProxy.mockRejectedValueOnce(notFound());
+      const mongoFn = jest.fn().mockResolvedValueOnce({ file_id: 'legacy', status: 'ready' });
+      await bind(
+        'updateFile',
+        mongoFn,
+      )({ file_id: 'legacy', status: 'ready', tenantId: undefined });
+      expect(mongoFn).toHaveBeenCalledTimes(1);
+      expect(mongoFn.mock.calls[0][0]).toEqual({ file_id: 'legacy', status: 'ready' });
+      expect(Object.keys(mongoFn.mock.calls[0][0])).not.toContain('tenantId');
+
+      // no undefined key → the caller's object itself is what Mongo sees
+      const clean = { file_id: 'mine', status: 'failed' };
+      const cas = { status: 'pending' };
+      const mongoFn2 = jest.fn().mockResolvedValueOnce(null);
+      await bind('updateFile', mongoFn2)(clean, cas);
+      expect(mongoFn2.mock.calls[0][0]).toBe(clean);
+      expect(mongoFn2.mock.calls[0][1]).toBe(cas);
+
+      // a strippable FILTER is still short-circuited by the base
+      const mongoFn3 = jest.fn().mockResolvedValueOnce({ file_id: 'x' });
+      expect(
+        await bind('updateFile', mongoFn3)(
+          { file_id: 'x', status: 'y' },
+          { previewRevision: undefined },
+        ),
+      ).toBeNull();
+      expect(mongoFn3).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('updateFile short-circuited'),
+      );
+    });
   });
 
   // ────────────────────────────────────────────────────────────────────────
