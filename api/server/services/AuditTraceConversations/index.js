@@ -91,9 +91,26 @@
  * deliberately stays unwired (a conversation-domain write this shim's own
  * territory owns, not chat-projects'), and why `refreshChatProjectStats`
  * deliberately stays unwired (a genuine cross-domain store-capability
- * gap). Every OTHER `~/models` export (users, roles, files, agent-event
+ * gap). Every OTHER `~/models` export (users, roles, agent-event
  * actors, subagent threads, …) still passes through `wrapModelMethods`
  * unchanged.
+ *
+ * **Files-domain extension ON THE ADAPTER BASE (2026-09-13, FOURTH reuse
+ * of this chokepoint — the first domain built on
+ * `../AuditTraceSovereignAdapter`, after three hand-written files shims
+ * were REJECTED).** `../AuditTraceFiles::SOVEREIGN_METHOD_BINDERS`
+ * (`findFileById`, `getFiles`, `createFile`, `updateFile`,
+ * `updateFileUsage`, `updateFilesUsage`, `deleteFile`, `deleteFiles`) is
+ * ALSO merged into `ALL_SOVEREIGN_METHOD_BINDERS` below. Those binders
+ * are BUILT by the base (`buildBinders()`), which is why `wrapModelMethods`
+ * now hands every binder `(token, mongoFn, mongoMethods)` instead of just
+ * `(token)`: the base's sovereign-first-by-id discipline needs the RAW
+ * Mongo function to fall through to for ids the caller does not own in
+ * sovereign — mid-call, not only at this wrapper's top. Every prior
+ * domain's binders are `(token) => ...` and ignore the two extra
+ * arguments (plain JS), so this is purely additive. The base has NO
+ * `AsyncLocalStorage` and NO backend branch of its own — this module's
+ * `wrapModelMethods` remains the ONE decision point.
  */
 
 const { callConsoleConversationsProxy } = require('./client');
@@ -127,6 +144,10 @@ const {
 const {
   SOVEREIGN_METHOD_BINDERS: CHAT_PROJECT_SOVEREIGN_METHOD_BINDERS,
 } = require('../AuditTraceChatProjects');
+// MongoDB-elimination Files domain ON THE ADAPTER BASE (2026-09-13, the
+// FOURTH reuse of this chokepoint) — same discipline as the merges above;
+// the binders themselves are built by `AuditTraceSovereignAdapter`.
+const { SOVEREIGN_METHOD_BINDERS: FILE_SOVEREIGN_METHOD_BINDERS } = require('../AuditTraceFiles');
 
 const COLLECT_ALL_PAGE_SIZE = 100;
 const DEFAULT_MESSAGES_BY_CURSOR_LIMIT = 25;
@@ -801,6 +822,7 @@ const ALL_SOVEREIGN_METHOD_BINDERS = {
   ...PRESET_SOVEREIGN_METHOD_BINDERS,
   ...PROMPT_SOVEREIGN_METHOD_BINDERS,
   ...CHAT_PROJECT_SOVEREIGN_METHOD_BINDERS,
+  ...FILE_SOVEREIGN_METHOD_BINDERS,
 };
 
 /**
@@ -844,14 +866,22 @@ const ALL_SOVEREIGN_METHOD_BINDERS = {
  * force a background write through.
  *
  * A `mongoMethods` key with no `ALL_SOVEREIGN_METHOD_BINDERS` entry
- * (every OTHER `~/models` export — users, roles, files, agent-event
- * actors, subagent threads, prompt ACL/sharing methods,
- * `assignConversationToProject`, `refreshChatProjectStats`, …) is
- * returned unchanged; this function only ever touches the named
- * conversation/message/preset/prompt/chat-project methods (the
- * `AuditTracePresets`/`AuditTracePrompts`/`AuditTraceChatProjects` merges
- * above are the WU-presets/WU-prompts/WU-chatprojects extensions — see
- * this module's docstring's "Method coverage" section).
+ * (every OTHER `~/models` export — users, roles, agent-event actors,
+ * subagent threads, prompt ACL/sharing methods,
+ * `assignConversationToProject`, `refreshChatProjectStats`, the 9
+ * disclosed-unwired file methods, …) is returned unchanged; this function
+ * only ever touches the named conversation/message/preset/prompt/
+ * chat-project/file methods (the `AuditTracePresets`/`AuditTracePrompts`/
+ * `AuditTraceChatProjects`/`AuditTraceFiles` merges above — see this
+ * module's docstring's "Method coverage" section).
+ *
+ * **Each binder receives `(token, mongoFn, mongoMethods)`, not just
+ * `(token)`** — the additive generalization the adapter base needs
+ * (`AuditTraceSovereignAdapter`'s sovereign-first-by-id discipline falls
+ * through to the RAW Mongo function for ids the caller does not own in
+ * sovereign, mid-call). Every prior domain's binders are `(token) => …`
+ * and ignore the extra arguments, so NOTHING about their behavior
+ * changes.
  *
  * @param {Record<string, Function>} mongoMethods - the FULL `createMethods(...)`
  *   output (or any object containing some of the same-named methods).
@@ -870,7 +900,7 @@ function wrapModelMethods(mongoMethods) {
     wrapped[name] = (...args) => {
       const token = isSovereignBackend() ? getRequestAccessToken() : undefined;
       if (token) {
-        return binder(token)(...args);
+        return binder(token, mongoFn, mongoMethods)(...args);
       }
       return mongoFn(...args);
     };
