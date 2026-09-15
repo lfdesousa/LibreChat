@@ -218,6 +218,18 @@ Without it, OpenID JWT request burst caching can serve a stale `req.user` until 
 
 ---
 
+## Commit messages
+
+**No AI-attribution trailers.** A commit message must not contain a
+`Co-Authored-By:` line — whoever is named, with no allow-list — nor a
+`Claude-Session:` line. The rule is enforced mechanically rather than by
+convention: `scripts/check-no-ai-trailers.sh` runs from `.husky/commit-msg`,
+from `.husky/pre-push`, and from the `No AI Trailers` CI workflow over the
+pull request's own commits. Fix an offending commit with `git commit --amend`
+or `git rebase -i`; `--no-verify` only defers it to CI.
+
+---
+
 ## Formatting
 
 Fix all formatting lint errors (trailing spaces, tabs, newlines, indentation) using auto-fix when available. All TypeScript/ESLint warnings and errors **must** be resolved.

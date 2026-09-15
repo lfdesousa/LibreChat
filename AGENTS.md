@@ -15,3 +15,10 @@ why any new custom CSS cannot be expressed by the shared system. See the detaile
 When adding or changing code that mutates user documents, invalidate the auth user document cache
 for affected users, including bulk role and user mutations. See the detailed policy in `CLAUDE.md`
 under “Auth cache invalidation”.
+
+## Commit messages
+
+No AI-attribution trailers: no `Co-Authored-By:` line (whoever is named, no allow-list) and no
+`Claude-Session:` line. Enforced by `scripts/check-no-ai-trailers.sh` from `.husky/commit-msg`,
+`.husky/pre-push`, and the `No AI Trailers` CI workflow. See the detailed policy in `CLAUDE.md`
+under “Commit messages”.
