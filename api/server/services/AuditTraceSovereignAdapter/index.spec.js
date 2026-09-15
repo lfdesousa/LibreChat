@@ -1001,23 +1001,34 @@ describe('AuditTraceSovereignAdapter — the base owns every invariant, proven o
     });
 
     /**
-     * F-C1 — the ASSIGNMENT surface, pinned BEHAVIOURALLY.
+     * F-C1 — the ASSIGNMENT surface against a DATA-descriptor target,
+     * pinned BEHAVIOURALLY.
      *
-     * This test pins what actually protects the map: a domain cannot put a
-     * raw callable on the shared view by assignment. It deliberately does
-     * NOT claim to pin the `set` trap. `set: refuse` is
-     * REDUNDANT-BUT-RETAINED: with it removed, `[[Set]]` falls to
-     * `OrdinarySetWithOwnDescriptor` with `Receiver` = the proxy, which
-     * consults the `getOwnPropertyDescriptor` trap and then calls
-     * `Receiver.[[DefineOwnProperty]]` — `defineProperty: refuse`. So this
-     * test stays GREEN when `set: refuse` alone is deleted, and that is
-     * disclosed rather than papered over (reviewer F-C1,
+     * This test pins what actually protects the map's REAL shape (the
+     * chokepoint's map is plain function values — data descriptors): a
+     * domain cannot put a raw callable on the shared view by assignment.
+     * For THIS shape it deliberately does NOT claim to pin the `set`
+     * trap: with `set: refuse` removed alone, `[[Set]]` falls to
+     * `OrdinarySetWithOwnDescriptor`, which resolves a DATA descriptor,
+     * so `Receiver` = the proxy consults the `getOwnPropertyDescriptor`
+     * trap and then calls `Receiver.[[DefineOwnProperty]]` —
+     * `defineProperty: refuse`. So this test stays GREEN when `set:
+     * refuse` alone is deleted against a data-descriptor target, and
+     * that is disclosed rather than papered over (reviewer F-C1,
      * `lesson-neuter-guards-individually-20260913`). Deleting BOTH
-     * `set: refuse` and `defineProperty: refuse` turns it RED on the side
-     * effect below — the injected raw callable lands on the shared target
-     * and the next sibling read hands it back.
+     * `set: refuse` and `defineProperty: refuse` turns it RED on the
+     * side effect below — the injected raw callable lands on the shared
+     * target and the next sibling read hands it back.
+     *
+     * **This is NOT the whole story for `set`** — corrected per reviewer
+     * F-D1 after a round-3 claim that `set: refuse` was un-pinnable
+     * FULL STOP was shown FALSE: `OrdinarySetWithOwnDescriptor` reaches
+     * `[[DefineOwnProperty]]` only for a DATA descriptor. Against an
+     * ACCESSOR-descriptor target `set: refuse` is independently
+     * PINNED — see the dedicated F-D1 test below, which neuters `set`
+     * alone against accessor-bearing targets and gets a side-effect RED.
      */
-    it('F-C1 (behavioural, NOT a `set`-trap pin): assignment cannot introduce a raw callable — strict-mode assignment throws, Reflect.set reports false, the SHARED target keeps the raw entry, and the next read is still guarded. Refused terminally by `defineProperty`; `set: refuse` is redundant-but-retained defence-in-depth (neuter BOTH for the RED)', async () => {
+    it('F-C1 (behavioural, data-descriptor target — NOT a `set`-trap pin for THIS shape): assignment cannot introduce a raw callable — strict-mode assignment throws, Reflect.set reports false, the SHARED target keeps the raw entry, and the next read is still guarded. Refused terminally by `defineProperty` for a data-descriptor target; `set: refuse` is redundant-but-retained defence-in-depth HERE (neuter BOTH for the RED) — see F-D1 below for the accessor-target case where `set` alone is load-bearing', async () => {
       // The sibling's OWN row, distinct from the stranger row queued on the
       // hostile callable, so the RED below is the leak itself and not a
       // shape diff: if the swap lands, a SAFE sibling call returns the
@@ -1068,6 +1079,96 @@ describe('AuditTraceSovereignAdapter — the base owns every invariant, proven o
       expect(setReported).toBe(false);
       expect(newKeyReported).toBe(false);
       expect(strictThrew).toBe(true);
+    });
+
+    /**
+     * F-D1 — `set: refuse` is INDEPENDENTLY PINNED against an
+     * ACCESSOR-descriptor target. This corrects a round-3 claim that
+     * `set: refuse` was un-pinnable / "unreachable as a control" FULL
+     * STOP, which was FALSE: `OrdinarySetWithOwnDescriptor` reaches
+     * `Receiver.[[DefineOwnProperty]]` ONLY when the resolved descriptor
+     * `IsDataDescriptor`. For an ACCESSOR descriptor — own on the target,
+     * inherited from the target's prototype, or living on a class
+     * instance's class prototype — it calls the setter DIRECTLY with
+     * `Receiver` = the proxy and returns, WITHOUT ever consulting
+     * `[[DefineOwnProperty]]`. `defineProperty: refuse` is not a sibling
+     * on this path — it never runs — so `set: refuse` is the ONLY guard
+     * that stops the write.
+     *
+     * The three target shapes below (own accessor, prototype accessor,
+     * class-instance-with-class-prototype-accessor) are the SAME exotic
+     * shapes F-C2 already constructs elsewhere in this file
+     * (`Object.create({leak})`, a class instance) — per the addendum's
+     * Requirement 3, a technique that pins one guard in this change must
+     * be checked against every other guard before that guard is declared
+     * un-pinnable.
+     *
+     * NEUTER: delete `set: refuse` alone from `guardMongoMethods`,
+     * KEEPING `defineProperty: refuse` → the setter FIRES (side effect:
+     * the shared state mutates) on all three targets below: RED.
+     * Restore `set: refuse` → GREEN. `cmp`-verified byte-identical
+     * before/after.
+     */
+    it('F-D1: `set` is INDEPENDENTLY PINNED against accessor-bearing targets — an own accessor, a prototype-inherited accessor, and a class-instance target whose class prototype carries the accessor all refuse the write WITHOUT ever reaching `defineProperty` (NEUTER: drop `set: refuse` alone, keep `defineProperty: refuse` → the setter fires and the shared state mutates on all three: RED)', () => {
+      const { adapter } = makeAdapter();
+
+      // Probe 1 — an OWN accessor property on the target itself.
+      const ownState = { mutated: false };
+      const ownTarget = {};
+      Object.defineProperty(ownTarget, 'sweepWidgets', {
+        get: () => undefined,
+        set: () => {
+          ownState.mutated = true;
+        },
+        configurable: true,
+        enumerable: true,
+      });
+      const ownView = adapter.guardMongoMethods(ownTarget);
+      const ownSetReported = Reflect.set(ownView, 'sweepWidgets', 'INJECTED');
+
+      // Probe 2 — an accessor INHERITED from the target's prototype (the
+      // exotic shape F-C2 builds with `Object.create({leak})`).
+      const protoState = { mutated: false };
+      const protoBag = {};
+      Object.defineProperty(protoBag, 'leak', {
+        get: () => undefined,
+        set: () => {
+          protoState.mutated = true;
+        },
+        configurable: true,
+        enumerable: true,
+      });
+      const exoticTarget = Object.create(protoBag);
+      const exoticView = adapter.guardMongoMethods(exoticTarget);
+      const protoSetReported = Reflect.set(exoticView, 'leak', 'INJECTED');
+
+      // Probe 3 — a CLASS-INSTANCE target, accessor on the class
+      // prototype (the other exotic shape F-C2 already uses).
+      const classState = { mutated: false };
+      class M {
+        get leak() {
+          return undefined;
+        }
+        set leak(_value) {
+          classState.mutated = true;
+        }
+      }
+      const classView = adapter.guardMongoMethods(new M());
+      const classSetReported = Reflect.set(classView, 'leak', 'INJECTED');
+
+      // SIDE EFFECT FIRST — the setter must NOT have fired on any of the
+      // three exotic shapes. With `set: refuse` removed alone, EACH of
+      // these flips to `true` (proven live during this fix round): the
+      // leak itself, never a shape difference.
+      expect(ownState.mutated).toBe(false);
+      expect(protoState.mutated).toBe(false);
+      expect(classState.mutated).toBe(false);
+
+      // Only then the refusal MECHANISM (secondary; not the security
+      // claim) — `Reflect.set` reports `false` on every shape.
+      expect(ownSetReported).toBe(false);
+      expect(protoSetReported).toBe(false);
+      expect(classSetReported).toBe(false);
     });
 
     it('F-C2: the PROTOTYPE CHAIN is trapped — Object.getPrototypeOf(view) reports Object.prototype even for an exotic target, so a callable living on the target prototype is NOT reachable raw (NEUTER: drop the `getPrototypeOf` trap → the raw fn is called and the stranger row comes back: RED)', async () => {

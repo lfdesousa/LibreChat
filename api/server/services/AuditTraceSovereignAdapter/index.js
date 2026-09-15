@@ -729,7 +729,7 @@ class AuditTraceSovereignAdapter {
    * Non-function entries pass through (see DISCLOSED, below); key
    * enumeration is unchanged.
    *
-   * **How to read this enumeration (reviewer F-C1,
+   * **How to read this enumeration (reviewer F-C1/F-D1,
    * `lesson-neuter-guards-individually-20260913`).** Every surface below
    * is CLOSED, and every one is pinned by a side-effect assertion in
    * `index.spec.js`. But "closed" and "independently falsifiable" are
@@ -764,25 +764,40 @@ class AuditTraceSovereignAdapter {
    *    prototype carries callables (`Object.create({leak})`, a class
    *    instance) the returned prototype hands back the UNWRAPPED function.
    *    The trap reports `Object.prototype`, the prototype a plain map has.
-   *  - `defineProperty` — **PINNED**, and it is the TERMINAL refuser of
-   *    the whole write side: `[[Set]]`, `Object.defineProperty`,
-   *    `Object.defineProperties` and strict-mode assignment all end at
-   *    `[[DefineOwnProperty]]`.
+   *  - `defineProperty` — **PINNED** for DATA-descriptor targets (the
+   *    chokepoint's actual shape: plain function values). `Object.defineProperty`,
+   *    `Object.defineProperties` and strict-mode assignment onto a
+   *    data-descriptor property all end at `Receiver.[[DefineOwnProperty]]`
+   *    (`OrdinarySetWithOwnDescriptor` reaches it only when the resolved
+   *    descriptor `IsDataDescriptor`). **It is NOT the terminal refuser of
+   *    every write surface** (a round-3 claim that was FALSE, reviewer
+   *    F-D1): for an ACCESSOR-descriptor property — own OR inherited —
+   *    `[[Set]]` calls the setter directly and returns WITHOUT ever
+   *    reaching `[[DefineOwnProperty]]`. See the `set` row below for the
+   *    surface this trap cannot see.
    *  - `deleteProperty` / `setPrototypeOf` / `preventExtensions` —
    *    **PINNED**, one `index.spec.js` assertion each.
-   *  - `set` — **REDUNDANT-BUT-RETAINED; sibling = `defineProperty`.**
-   *    Assignment to the view IS refused, but not by this trap: with no
-   *    `set` trap, `[[Set]]` falls to `OrdinarySetWithOwnDescriptor` with
-   *    `Receiver` = the proxy, which consults the `getOwnPropertyDescriptor`
-   *    trap above and then calls `Receiver.[[DefineOwnProperty]]` — i.e.
-   *    `defineProperty: refuse`. So removing `set: refuse` alone leaves
-   *    the suite GREEN; it is unreachable as a control. Retained because
-   *    it refuses one `[[DefineOwnProperty]]` hop earlier and keeps the
-   *    write side closed should `defineProperty` ever be narrowed. The
-   *    protection itself (a domain cannot swap a guarded entry for a raw
-   *    one) is pinned behaviourally; the PAIR goes RED when both traps
-   *    are removed together. Exactly the disclosure the undefined-key
-   *    `isMongoSafeFilter`/`classifyFilter` pair carries.
+   *  - `set` — **PINNED** (reviewer F-D1; corrects a round-3 false claim
+   *    that this trap was un-pinnable / "unreachable as a control"). The
+   *    true boundary, stated exactly: for a DATA-descriptor target (the
+   *    chokepoint's real map — plain function values), assignment IS
+   *    caught one hop later by `defineProperty: refuse`
+   *    (`OrdinarySetWithOwnDescriptor` resolves a data descriptor and
+   *    calls `Receiver.[[DefineOwnProperty]]`), so for THAT shape `set:
+   *    refuse` is REDUNDANT-BUT-RETAINED defence-in-depth (see the F-C1
+   *    test, which pins the data-descriptor case behaviourally). But for
+   *    an ACCESSOR-descriptor property — own on the target, inherited
+   *    from the target's prototype, or living on a class instance's
+   *    class prototype — `OrdinarySetWithOwnDescriptor` calls the setter
+   *    directly with `Receiver` = the proxy and returns; `[[DefineOwnProperty]]`
+   *    is never consulted, so `defineProperty: refuse` cannot see that
+   *    write at all. `set: refuse` is the ONLY thing that stops it, and
+   *    it is independently falsifiable there: `index.spec.js` (F-D1)
+   *    neuters `set` alone against an own-accessor target, a
+   *    prototype-accessor target, and a class-instance target whose
+   *    class prototype carries the accessor — the setter fires (RED,
+   *    side effect: the shared map mutates) in all three; restoring
+   *    `set: refuse` closes all three (GREEN).
    *  - F-B5 — inherited `Object.prototype` members (`hasOwnProperty`,
    *    `toString`, `constructor`, ...) are returned verbatim instead of
    *    being `async`-wrapped: `ctx.mongoMethods.hasOwnProperty('x')` is a
@@ -840,8 +855,11 @@ class AuditTraceSovereignAdapter {
       // object literal), so this never throws where the untrapped form
       // would not.
       getPrototypeOf: () => Object.prototype,
-      // `defineProperty` is the TERMINAL refuser of every write surface,
-      // `set` included (see the docstring's falsifiability breakdown).
+      // `set` independently closes the ACCESSOR-descriptor write path
+      // that `defineProperty` cannot see — for an accessor property
+      // `[[Set]]` calls the setter directly and never reaches
+      // `[[DefineOwnProperty]]` (reviewer F-D1; see the docstring's
+      // falsifiability breakdown above `guardMongoMethods`).
       set: refuse,
       defineProperty: refuse,
       deleteProperty: refuse,
