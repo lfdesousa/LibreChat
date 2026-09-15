@@ -685,6 +685,589 @@ describe('AuditTraceSovereignAdapter — the base owns every invariant, proven o
   });
 
   // ────────────────────────────────────────────────────────────────────────
+  describe('F-A1 — the escape hatch is CLOSED: a HOSTILE impl reaching Mongo through ctx is guarded (NEUTER: hand impl the raw mongoFn/mongoMethods in buildBinders → the stranger row comes back: RED)', () => {
+    /** A domain that IGNORES every base primitive and calls the ctx handle directly — the F6 mechanism by hand. */
+    const hostileMethods = {
+      rawRead: {
+        kind: 'read',
+        arity: 1,
+        emptyResult: [],
+        impl(args, ctx) {
+          return ctx.mongoFn(args[0]);
+        },
+      },
+      rawSibling: {
+        kind: 'read',
+        arity: 1,
+        emptyResult: [],
+        impl(args, ctx) {
+          return ctx.mongoMethods.other(args[0]);
+        },
+      },
+      rawDeclaredSibling: {
+        kind: 'read',
+        arity: 1,
+        impl(args, ctx) {
+          return ctx.mongoMethods.sweepWidgets(args[0]);
+        },
+      },
+      sweepWidgets: {
+        kind: 'deferred',
+        arity: 1,
+        emptyResult: null,
+        impl(args, ctx) {
+          return this.deferToMongo(ctx, args);
+        },
+      },
+    };
+    const stranger = [{ widget_id: 'ANOTHER-USERS-ROW', text: 'secret' }];
+
+    it('ctx.mongoFn({_id: undefined}) from a hostile impl → the declared emptyResult, the raw Mongo function NEVER called, the stranger row NOT returned, warning names the method', async () => {
+      const { adapter } = makeAdapter({ methods: hostileMethods });
+      const mongoFn = jest.fn().mockResolvedValue(stranger);
+      const bound = adapter.buildBinders().rawRead('tok', mongoFn, {});
+
+      const result = await bound({ _id: undefined });
+
+      expect(result).toEqual([]);
+      expect(result).not.toEqual(stranger);
+      expect(mongoFn).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/\[AuditTraceSovereignAdapter:widgets\] rawRead short-circuited/),
+      );
+    });
+
+    it('ctx.mongoFn with a SAFE filter forwards it BYTE-IDENTICAL (same object reference) and returns what Mongo returned — behaviour preserved', async () => {
+      const { adapter } = makeAdapter({ methods: hostileMethods });
+      const mongoFn = jest.fn().mockResolvedValue(stranger);
+      const filter = { widget_id: 'w1', color: 'red' };
+      const result = await adapter.buildBinders().rawRead('tok', mongoFn, {})(filter);
+      expect(mongoFn).toHaveBeenCalledTimes(1);
+      expect(mongoFn.mock.calls[0][0]).toBe(filter);
+      expect(result).toBe(stranger);
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('every callable reachable via ctx.mongoMethods is guarded too: an undeclared sibling yields undefined, a declared sibling yields ITS emptyResult, neither raw function is called; safe args still forward', async () => {
+      const { adapter } = makeAdapter({ methods: hostileMethods });
+      const other = jest.fn().mockResolvedValue(stranger);
+      const sweepWidgets = jest.fn().mockResolvedValue(stranger);
+      const binders = adapter.buildBinders();
+      const methods = { other, sweepWidgets, notAFunction: 42 };
+
+      expect(await binders.rawSibling('tok', jest.fn(), methods)({ widget_id: undefined })).toBe(
+        undefined,
+      );
+      expect(other).not.toHaveBeenCalled();
+      expect(
+        await binders.rawDeclaredSibling('tok', jest.fn(), methods)({ widget_id: undefined }),
+      ).toBeNull();
+      expect(sweepWidgets).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledTimes(2);
+
+      const safe = { widget_id: 'w1' };
+      expect(await binders.rawSibling('tok', jest.fn(), methods)(safe)).toBe(stranger);
+      expect(other.mock.calls[0][0]).toBe(safe);
+      // Non-function entries and key enumeration pass through untouched.
+      expect(adapter.guardMongoMethods(methods).notAFunction).toBe(42);
+      expect(Object.keys(adapter.guardMongoMethods(methods))).toEqual(Object.keys(methods));
+    });
+
+    it('ONE definition of "safe to hand to Mongo": areMongoSafeArgs has exactly one call site in the base, guardMongoFn is idempotent, and deferToMongo over a pre-guarded ctx warns exactly ONCE', async () => {
+      const src = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8');
+      expect(src.match(/areMongoSafeArgs\(/g)).toHaveLength(1);
+
+      const { adapter } = makeAdapter({ methods: hostileMethods });
+      const raw = jest.fn();
+      const once = adapter.guardMongoFn(raw, { name: 'x', emptyResult: null });
+      expect(adapter.guardMongoFn(once, { name: 'x', emptyResult: null })).toBe(once);
+      expect(once).not.toBe(raw);
+      expect(adapter.guardMongoFn(undefined)).toBeUndefined();
+      expect(adapter.guardMongoFn('not-a-fn')).toBe('not-a-fn');
+
+      // Through a binder, a deferred impl composes deferToMongo on an
+      // ALREADY-guarded ctx.mongoFn: one guard, one warning, emptyResult.
+      const mongoFn = jest.fn().mockResolvedValue(stranger);
+      expect(
+        await adapter.buildBinders().sweepWidgets('tok', mongoFn, {})({ widget_id: undefined }),
+      ).toBeNull();
+      expect(mongoFn).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sweepWidgets'));
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  describe('F-B1 — EVERY reflective surface of ctx is closed, the property-descriptor path included (NEUTER: drop the `getOwnPropertyDescriptor` trap in guardMongoMethods → the three descriptor rows return the stranger row and call the raw sibling: RED)', () => {
+    const stranger = [{ widget_id: 'ANOTHER-USERS-ROW', text: 'secret' }];
+
+    /**
+     * Each row is a way a hostile `impl` could try to get a Mongo callable
+     * out of `ctx`; `reach(ctx)` (called with `this` = the adapter, as an
+     * impl is) returns the callable the domain would then invoke with a
+     * strippable filter. The declared sibling `sweepWidgets` and the probe
+     * itself both declare `emptyResult: null`, so a GUARDED handle resolves
+     * `null`; the RAW one would resolve the stranger row queued on it.
+     */
+    const surfaces = [
+      ['direct ctx.mongoFn', (ctx) => ctx.mongoFn],
+      ['lazy ctx.mongoMethods.<name>', (ctx) => ctx.mongoMethods.sweepWidgets],
+      [
+        'destructured {<name>} = ctx.mongoMethods',
+        (ctx) => {
+          const { sweepWidgets } = ctx.mongoMethods;
+          return sweepWidgets;
+        },
+      ],
+      ['spread {...ctx.mongoMethods}.<name>', (ctx) => ({ ...ctx.mongoMethods }).sweepWidgets],
+      [
+        'Object.assign({}, ctx.mongoMethods).<name>',
+        (ctx) => Object.assign({}, ctx.mongoMethods).sweepWidgets,
+      ],
+      [
+        'Object.values(ctx.mongoMethods)',
+        (ctx) => Object.values(ctx.mongoMethods).find((v) => typeof v === 'function'),
+      ],
+      [
+        'Object.fromEntries(Object.entries(ctx.mongoMethods)).<name>',
+        (ctx) => Object.fromEntries(Object.entries(ctx.mongoMethods)).sweepWidgets,
+      ],
+      [
+        'Reflect.get(ctx.mongoMethods, <name>)',
+        (ctx) => Reflect.get(ctx.mongoMethods, 'sweepWidgets'),
+      ],
+      [
+        'symbol strip: delete the guard marker from the handle, then call it',
+        (ctx) => {
+          const handle = ctx.mongoFn;
+          for (const sym of Object.getOwnPropertySymbols(handle)) {
+            delete handle[sym];
+          }
+          return handle;
+        },
+      ],
+      [
+        'symbol forge: stamp the marker taken from ctx.mongoFn onto a hand-made ctx handed to deferToMongo',
+        function forge(ctx) {
+          const [marker] = Object.getOwnPropertySymbols(ctx.mongoFn);
+          const handle = ctx.mongoMethods.sweepWidgets;
+          handle[marker] = true;
+          return (filter) => this.deferToMongo({ ...ctx, mongoFn: handle }, [filter]);
+        },
+      ],
+      [
+        'Object.getOwnPropertyDescriptor(ctx.mongoMethods, <name>).value  (F-B1)',
+        (ctx) => Object.getOwnPropertyDescriptor(ctx.mongoMethods, 'sweepWidgets').value,
+      ],
+      [
+        'Object.getOwnPropertyDescriptors(ctx.mongoMethods).<name>.value  (F-B1)',
+        (ctx) => Object.getOwnPropertyDescriptors(ctx.mongoMethods).sweepWidgets.value,
+      ],
+      [
+        'Reflect.getOwnPropertyDescriptor(ctx.mongoMethods, <name>).value  (F-B1)',
+        (ctx) => Reflect.getOwnPropertyDescriptor(ctx.mongoMethods, 'sweepWidgets').value,
+      ],
+    ];
+
+    /** A hostile domain whose ONE method reaches Mongo via `reach`. */
+    const hostile = (reach) => ({
+      probe: {
+        kind: 'read',
+        arity: 1,
+        emptyResult: null,
+        impl(args, ctx) {
+          return reach.call(this, ctx)(args[0]);
+        },
+      },
+      sweepWidgets: {
+        kind: 'deferred',
+        arity: 1,
+        emptyResult: null,
+        impl(args, ctx) {
+          return this.deferToMongo(ctx, args);
+        },
+      },
+    });
+
+    it.each(surfaces)(
+      '%s → the raw Mongo function is NOT called, the stranger row is NOT returned (the declared emptyResult is); the SAME surface with a SAFE filter still reaches Mongo byte-identical',
+      async (_label, reach) => {
+        const rawFn = jest.fn().mockResolvedValue(stranger);
+        const rawSibling = jest.fn().mockResolvedValue(stranger);
+        const { adapter } = makeAdapter({ methods: hostile(reach) });
+        const bound = adapter
+          .buildBinders()
+          .probe('tok', rawFn, { sweepWidgets: rawSibling, notAFunction: 42 });
+
+        const result = await bound({ widget_id: undefined });
+
+        expect(result).toBeNull();
+        expect(result).not.toEqual(stranger);
+        expect(rawFn).not.toHaveBeenCalled();
+        expect(rawSibling).not.toHaveBeenCalled();
+        expect(logger.warn).toHaveBeenCalledTimes(1);
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringMatching(/\[AuditTraceSovereignAdapter:widgets\] .* short-circuited/),
+        );
+
+        const safe = { widget_id: 'w1' };
+        expect(await bound(safe)).toBe(stranger);
+        const rawCalls = [...rawFn.mock.calls, ...rawSibling.mock.calls];
+        expect(rawCalls).toHaveLength(1);
+        expect(rawCalls[0][0]).toBe(safe);
+      },
+    );
+
+    it("the reviewer's F-B1 proof, inverted: Object.getOwnPropertyDescriptor(ctx.mongoMethods, 'sibling').value({_id: undefined}) — the stranger row queued on the raw sibling is NOT returned and the raw sibling is NOT called; the descriptor carries the GUARDED callable with the target's attributes", async () => {
+      const rawSibling = jest.fn().mockResolvedValue(stranger);
+      let seen;
+      const { adapter } = makeAdapter({
+        methods: hostile((ctx) => {
+          seen = Object.getOwnPropertyDescriptor(ctx.mongoMethods, 'sibling');
+          return seen.value;
+        }),
+      });
+      const target = { sibling: rawSibling };
+
+      const result = await adapter.buildBinders().probe('tok', jest.fn(), target)({
+        _id: undefined,
+      });
+
+      expect(result).not.toEqual(stranger);
+      expect(result).toBeUndefined(); // an undeclared sibling has no emptyResult
+      expect(rawSibling).not.toHaveBeenCalled();
+      expect(seen.value).not.toBe(rawSibling);
+      expect(Object.getOwnPropertySymbols(seen.value)).toHaveLength(1); // the guard marker
+      expect(seen).toMatchObject({ writable: true, enumerable: true, configurable: true });
+      // The target itself is untouched — the guarded value lives only in the view.
+      expect(Object.getOwnPropertyDescriptor(target, 'sibling').value).toBe(rawSibling);
+      // A cached handle taken from the descriptor stays guarded on a later call too.
+      expect(await seen.value({ widget_id: undefined })).toBeUndefined();
+      expect(rawSibling).not.toHaveBeenCalled();
+      // Non-existent keys report non-existent through the trap.
+      expect(
+        Object.getOwnPropertyDescriptor(adapter.guardMongoMethods(target), 'nope'),
+      ).toBeUndefined();
+    });
+
+    it('cached-before-use: a handle cached from a SAFE first call and reused with a strippable filter is still guarded (the guard is on the handle, not on the call)', async () => {
+      const rawSibling = jest.fn().mockResolvedValue(stranger);
+      let cached;
+      const { adapter } = makeAdapter({
+        methods: hostile((ctx) => {
+          cached = cached || ctx.mongoMethods.sweepWidgets;
+          return cached;
+        }),
+      });
+      const bound = adapter.buildBinders().probe('tok', jest.fn(), { sweepWidgets: rawSibling });
+      const safe = { widget_id: 'w1' };
+      expect(await bound(safe)).toBe(stranger);
+      expect(rawSibling).toHaveBeenCalledTimes(1);
+      expect(await bound({ widget_id: undefined })).toBeNull();
+      expect(rawSibling).toHaveBeenCalledTimes(1);
+    });
+
+    it('the view is READ-ONLY: defineProperty/deleteProperty/setPrototypeOf/preventExtensions are each refused (one trap each, individually falsifiable) and the SHARED target map is untouched — a domain cannot swap a guarded entry for a raw one', async () => {
+      const rawSibling = jest.fn().mockResolvedValue(stranger);
+      const injected = jest.fn().mockResolvedValue(stranger);
+      const { adapter } = makeAdapter();
+      const target = { sweepWidgets: rawSibling };
+      const view = adapter.guardMongoMethods(target);
+
+      expect(() => Object.defineProperty(view, 'sweepWidgets', { value: injected })).toThrow(
+        TypeError,
+      );
+      expect(() => Object.defineProperty(view, 'injected', { value: injected })).toThrow(TypeError);
+      // Assignment is refused too, but NOT by the `set` trap — see the F-C1
+      // test below for the disclosure; these two lines are behavioural and
+      // are NOT what makes this test's title true.
+      expect(Reflect.set(view, 'sweepWidgets', injected)).toBe(false);
+      expect(Reflect.set(view, 'injected', injected)).toBe(false);
+      expect(Reflect.deleteProperty(view, 'sweepWidgets')).toBe(false);
+      expect(Reflect.setPrototypeOf(view, { leak: injected })).toBe(false);
+      expect(Reflect.preventExtensions(view)).toBe(false);
+      expect(() => Object.freeze(view)).toThrow(TypeError);
+
+      expect(Object.keys(target)).toEqual(['sweepWidgets']);
+      expect(target.sweepWidgets).toBe(rawSibling);
+      expect(Object.isExtensible(target)).toBe(true);
+      expect(Object.getPrototypeOf(target)).toBe(Object.prototype);
+      expect(Object.getPrototypeOf(view)).toBe(Object.prototype);
+      expect(Reflect.get(Object.getPrototypeOf(view), 'sweepWidgets')).toBeUndefined();
+
+      expect(await view.sweepWidgets({ widget_id: undefined })).toBeNull();
+      expect(rawSibling).not.toHaveBeenCalled();
+      expect(injected).not.toHaveBeenCalled();
+    });
+
+    /**
+     * F-C1 — the ASSIGNMENT surface against a DATA-descriptor target,
+     * pinned BEHAVIOURALLY.
+     *
+     * This test pins what actually protects the map's REAL shape (the
+     * chokepoint's map is plain function values — data descriptors): a
+     * domain cannot put a raw callable on the shared view by assignment.
+     * For THIS shape it deliberately does NOT claim to pin the `set`
+     * trap: with `set: refuse` removed alone, `[[Set]]` falls to
+     * `OrdinarySetWithOwnDescriptor`, which resolves a DATA descriptor,
+     * so `Receiver` = the proxy consults the `getOwnPropertyDescriptor`
+     * trap and then calls `Receiver.[[DefineOwnProperty]]` —
+     * `defineProperty: refuse`. So this test stays GREEN when `set:
+     * refuse` alone is deleted against a data-descriptor target, and
+     * that is disclosed rather than papered over (reviewer F-C1,
+     * `lesson-neuter-guards-individually-20260913`). Deleting BOTH
+     * `set: refuse` and `defineProperty: refuse` turns it RED on the
+     * side effect below — the injected raw callable lands on the shared
+     * target and the next sibling read hands it back.
+     *
+     * **This is NOT the whole story for `set`** — corrected per reviewer
+     * F-D1 after a round-3 claim that `set: refuse` was un-pinnable
+     * FULL STOP was shown FALSE: `OrdinarySetWithOwnDescriptor` reaches
+     * `[[DefineOwnProperty]]` only for a DATA descriptor. Against an
+     * ACCESSOR-descriptor target `set: refuse` is independently
+     * PINNED — see the dedicated F-D1 test below, which neuters `set`
+     * alone against accessor-bearing targets and gets a side-effect RED.
+     */
+    it('F-C1 (behavioural, data-descriptor target — NOT a `set`-trap pin for THIS shape): assignment cannot introduce a raw callable — strict-mode assignment throws, Reflect.set reports false, the SHARED target keeps the raw entry, and the next read is still guarded. Refused terminally by `defineProperty` for a data-descriptor target; `set: refuse` is redundant-but-retained defence-in-depth HERE (neuter BOTH for the RED) — see F-D1 below for the accessor-target case where `set` alone is load-bearing', async () => {
+      // The sibling's OWN row, distinct from the stranger row queued on the
+      // hostile callable, so the RED below is the leak itself and not a
+      // shape diff: if the swap lands, a SAFE sibling call returns the
+      // stranger row instead of the sibling's own.
+      const ownRow = [{ widget_id: 'w1', text: 'the real sibling' }];
+      const rawSibling = jest.fn().mockResolvedValue(ownRow);
+      const injected = jest.fn().mockResolvedValue(stranger);
+      const { adapter } = makeAdapter();
+      const target = { sweepWidgets: rawSibling };
+      const view = adapter.guardMongoMethods(target);
+
+      // Attempt the swap by both assignment shapes. Refusal surfaces either
+      // as `false` or as a TypeError depending on the caller's mode, so the
+      // attempts are made TOLERANTLY here and the assertions below are on
+      // the SIDE EFFECT, never on the refusal mechanism — a neutered pair
+      // must go RED on the leak, not on how the leak was reported.
+      const setReported = Reflect.set(view, 'sweepWidgets', injected);
+      const newKeyReported = Reflect.set(view, 'injected', injected);
+      // This spec file is CommonJS (sloppy mode), where a refused `[[Set]]`
+      // is a silent no-op; the directive makes the refusal observable as
+      // the TypeError a strict-mode caller actually gets.
+      function strictAssign(v, x) {
+        'use strict';
+        v.sweepWidgets = x;
+      }
+      let strictThrew = false;
+      try {
+        strictAssign(view, injected);
+      } catch {
+        strictThrew = true;
+      }
+
+      // SIDE EFFECT — the assertions that carry the security claim. The
+      // SHARED map still holds the chokepoint's entry, so a sibling call
+      // reaches the REAL sibling and returns ITS row; the hostile callable
+      // is never invoked and the stranger row never comes back.
+      expect(await view.sweepWidgets({ widget_id: 'w1' })).toBe(ownRow);
+      expect(await view.sweepWidgets({ widget_id: 'w1' })).not.toBe(stranger);
+      expect(injected).not.toHaveBeenCalled();
+      expect(rawSibling).toHaveBeenCalledTimes(2);
+      expect(target.sweepWidgets).toBe(rawSibling);
+      expect(Object.hasOwn(target, 'injected')).toBe(false);
+      // The guard survives the attempt too — the entry is still wrapped.
+      expect(await view.sweepWidgets({ widget_id: undefined })).toBeNull();
+      expect(rawSibling).toHaveBeenCalledTimes(2);
+
+      // Only now, the refusal MECHANISM (secondary; not the security claim).
+      expect(setReported).toBe(false);
+      expect(newKeyReported).toBe(false);
+      expect(strictThrew).toBe(true);
+    });
+
+    /**
+     * F-D1 — `set: refuse` is INDEPENDENTLY PINNED against an
+     * ACCESSOR-descriptor target. This corrects a round-3 claim that
+     * `set: refuse` was un-pinnable / "unreachable as a control" FULL
+     * STOP, which was FALSE: `OrdinarySetWithOwnDescriptor` reaches
+     * `Receiver.[[DefineOwnProperty]]` ONLY when the resolved descriptor
+     * `IsDataDescriptor`. For an ACCESSOR descriptor — own on the target,
+     * inherited from the target's prototype, or living on a class
+     * instance's class prototype — it calls the setter DIRECTLY with
+     * `Receiver` = the proxy and returns, WITHOUT ever consulting
+     * `[[DefineOwnProperty]]`. `defineProperty: refuse` is not a sibling
+     * on this path — it never runs — so `set: refuse` is the ONLY guard
+     * that stops the write.
+     *
+     * The three target shapes below (own accessor, prototype accessor,
+     * class-instance-with-class-prototype-accessor) are the SAME exotic
+     * shapes F-C2 already constructs elsewhere in this file
+     * (`Object.create({leak})`, a class instance) — per the addendum's
+     * Requirement 3, a technique that pins one guard in this change must
+     * be checked against every other guard before that guard is declared
+     * un-pinnable.
+     *
+     * NEUTER: delete `set: refuse` alone from `guardMongoMethods`,
+     * KEEPING `defineProperty: refuse` → the setter FIRES (side effect:
+     * the shared state mutates) on all three targets below: RED.
+     * Restore `set: refuse` → GREEN. `cmp`-verified byte-identical
+     * before/after.
+     */
+    it('F-D1: `set` is INDEPENDENTLY PINNED against accessor-bearing targets — an own accessor, a prototype-inherited accessor, and a class-instance target whose class prototype carries the accessor all refuse the write WITHOUT ever reaching `defineProperty` (NEUTER: drop `set: refuse` alone, keep `defineProperty: refuse` → the setter fires and the shared state mutates on all three: RED)', () => {
+      const { adapter } = makeAdapter();
+
+      // Probe 1 — an OWN accessor property on the target itself.
+      const ownState = { mutated: false };
+      const ownTarget = {};
+      Object.defineProperty(ownTarget, 'sweepWidgets', {
+        get: () => undefined,
+        set: () => {
+          ownState.mutated = true;
+        },
+        configurable: true,
+        enumerable: true,
+      });
+      const ownView = adapter.guardMongoMethods(ownTarget);
+      const ownSetReported = Reflect.set(ownView, 'sweepWidgets', 'INJECTED');
+
+      // Probe 2 — an accessor INHERITED from the target's prototype (the
+      // exotic shape F-C2 builds with `Object.create({leak})`).
+      const protoState = { mutated: false };
+      const protoBag = {};
+      Object.defineProperty(protoBag, 'leak', {
+        get: () => undefined,
+        set: () => {
+          protoState.mutated = true;
+        },
+        configurable: true,
+        enumerable: true,
+      });
+      const exoticTarget = Object.create(protoBag);
+      const exoticView = adapter.guardMongoMethods(exoticTarget);
+      const protoSetReported = Reflect.set(exoticView, 'leak', 'INJECTED');
+
+      // Probe 3 — a CLASS-INSTANCE target, accessor on the class
+      // prototype (the other exotic shape F-C2 already uses).
+      const classState = { mutated: false };
+      class M {
+        get leak() {
+          return undefined;
+        }
+        set leak(_value) {
+          classState.mutated = true;
+        }
+      }
+      const classView = adapter.guardMongoMethods(new M());
+      const classSetReported = Reflect.set(classView, 'leak', 'INJECTED');
+
+      // SIDE EFFECT FIRST — the setter must NOT have fired on any of the
+      // three exotic shapes. With `set: refuse` removed alone, EACH of
+      // these flips to `true` (proven live during this fix round): the
+      // leak itself, never a shape difference.
+      expect(ownState.mutated).toBe(false);
+      expect(protoState.mutated).toBe(false);
+      expect(classState.mutated).toBe(false);
+
+      // Only then the refusal MECHANISM (secondary; not the security
+      // claim) — `Reflect.set` reports `false` on every shape.
+      expect(ownSetReported).toBe(false);
+      expect(protoSetReported).toBe(false);
+      expect(classSetReported).toBe(false);
+    });
+
+    it('F-C2: the PROTOTYPE CHAIN is trapped — Object.getPrototypeOf(view) reports Object.prototype even for an exotic target, so a callable living on the target prototype is NOT reachable raw (NEUTER: drop the `getPrototypeOf` trap → the raw fn is called and the stranger row comes back: RED)', async () => {
+      const rawSibling = jest.fn().mockResolvedValue(stranger);
+      const { adapter } = makeAdapter();
+
+      // A target whose CALLABLE lives on its prototype, not as an own key.
+      const exotic = Object.create({ leak: rawSibling });
+      const exoticView = adapter.guardMongoMethods(exotic);
+
+      // SIDE EFFECT FIRST — walk the prototype exactly as a hostile impl
+      // would and CALL whatever it yields with a strippable filter. Without
+      // the trap `proto` IS `{leak: rawSibling}`, so this calls the raw fn
+      // and hands back the stranger row: RED on the leak, not on a shape.
+      const proto = Object.getPrototypeOf(exoticView);
+      const reached = Reflect.get(proto, 'leak');
+      const viaPrototype =
+        typeof reached === 'function' ? await reached({ _id: undefined }) : reached;
+      expect(viaPrototype).toBeUndefined();
+      expect(viaPrototype).not.toEqual(stranger);
+      expect(rawSibling).not.toHaveBeenCalled();
+
+      // The same walk on a CLASS-INSTANCE target — the other exotic shape.
+      class M {}
+      M.prototype.leak = rawSibling;
+      const classProto = Object.getPrototypeOf(adapter.guardMongoMethods(new M()));
+      const classReached = Reflect.get(classProto, 'leak');
+      const viaClassProto =
+        typeof classReached === 'function' ? await classReached({ _id: undefined }) : classReached;
+      expect(viaClassProto).toBeUndefined();
+      expect(viaClassProto).not.toEqual(stranger);
+      expect(rawSibling).not.toHaveBeenCalled();
+
+      // Only then the shape the trap reports (secondary).
+      expect(proto).toBe(Object.prototype);
+      expect(classProto).toBe(Object.prototype);
+      expect(Reflect.getPrototypeOf(exoticView)).toBe(Object.prototype);
+    });
+
+    /**
+     * F-C3 — pins the DISCLOSED limit, not a guard. The guard wraps
+     * callable entries; a callable nested inside a non-function entry is
+     * handed over by reference. Not live (the ONE chokepoint's map is
+     * functions only) and stated as such on `guardMongoMethods`. This test
+     * exists so the disclosure cannot drift silently: if a later change
+     * deep-wraps nested bags, this goes RED and the docstring must be
+     * updated with it.
+     */
+    it('F-C3 (DISCLOSED limit, not a guard): a non-function entry passes through BY REFERENCE, so a callable nested inside it is reachable raw — pinned so the disclosure on `guardMongoMethods` cannot drift', async () => {
+      const rawNested = jest.fn().mockResolvedValue(stranger);
+      const { adapter } = makeAdapter();
+      const bag = { inner: rawNested };
+      const view = adapter.guardMongoMethods({ bag, notAFunction: 42 });
+
+      expect(view.bag).toBe(bag);
+      expect(view.bag.inner).toBe(rawNested);
+      expect(view.notAFunction).toBe(42);
+      // The disclosed consequence, asserted rather than described.
+      expect(await view.bag.inner({ widget_id: undefined })).toBe(stranger);
+      expect(rawNested).toHaveBeenCalledTimes(1);
+    });
+
+    it('F-B5: inherited Object.prototype members are returned verbatim (hasOwnProperty is a boolean, constructor is Object), while a function on an EXOTIC prototype is still guarded', async () => {
+      const rawSibling = jest.fn().mockResolvedValue(stranger);
+      const { adapter } = makeAdapter();
+      const view = adapter.guardMongoMethods({ sweepWidgets: rawSibling });
+
+      // eslint-disable-next-line no-prototype-builtins -- the inherited call IS the surface under test
+      const own = view.hasOwnProperty('sweepWidgets');
+      // eslint-disable-next-line no-prototype-builtins -- the inherited call IS the surface under test
+      const notOwn = view.hasOwnProperty('nope');
+      // Without the pass-through the trap hands back an `async` wrapper whose
+      // detached call (`hasOwnProperty` with no `this`) REJECTS; settle both
+      // so a neutered trap fails the assertions below instead of killing the
+      // jest worker with an unhandled rejection.
+      await Promise.allSettled([own, notOwn]);
+      expect(own).toBe(true);
+      expect(notOwn).toBe(false);
+      expect(view.constructor).toBe(Object);
+      expect(view.toString()).toBe('[object Object]');
+      expect(view.nope).toBeUndefined();
+
+      const exotic = Object.create({ leak: rawSibling });
+      const exoticView = adapter.guardMongoMethods(exotic);
+      expect(await exoticView.leak({ widget_id: undefined })).toBeUndefined();
+      expect(rawSibling).not.toHaveBeenCalled();
+    });
+
+    it('a FROZEN target cannot be guarded silently: the engine throws TypeError on read and on descriptor access rather than let the trap report a substitute — fail-closed, never a leak', () => {
+      const rawSibling = jest.fn().mockResolvedValue(stranger);
+      const { adapter } = makeAdapter();
+      const view = adapter.guardMongoMethods(Object.freeze({ sweepWidgets: rawSibling }));
+      expect(() => view.sweepWidgets).toThrow(TypeError);
+      expect(() => Object.getOwnPropertyDescriptor(view, 'sweepWidgets')).toThrow(TypeError);
+      expect(rawSibling).not.toHaveBeenCalled();
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
   describe('config validation — a domain cannot instantiate an incomplete base', () => {
     it('rejects a missing required field, an empty methods map, an unknown kind, a missing impl, a bad arity', () => {
       const good = () => makeAdapter();

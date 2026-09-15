@@ -575,6 +575,206 @@ describe('AuditTraceFiles — the files domain ON the sovereign adapter base', (
   });
 
   // ────────────────────────────────────────────────────────────────────────
+  describe("F-A2 — deleteFiles(null, user) sweeps ONLY the request subject's own-list (NEUTER: drop the `user !== sub` check → the caller's rows are listed and DELETEd: RED)", () => {
+    it("an admin-shaped call naming ANOTHER user: the caller's sovereign own-list is NOT listed, NOT deleted; Mongo runs for the named user only; count = Mongo's; warning logged", async () => {
+      // Queue an own-list + DELETE so the leak WOULD be observable if the guard were absent.
+      callConsoleFileRecordsProxy
+        .mockResolvedValueOnce({ items: [item('admins-own')], next_cursor: null })
+        .mockResolvedValueOnce({ items: [item('admins-own')] })
+        .mockResolvedValueOnce(undefined);
+      const mongoFn = jest.fn().mockResolvedValueOnce({ deletedCount: 4 });
+
+      const result = await runWithRequestAccessToken({ accessToken: 'tok', sub: 'admin-1' }, () =>
+        bind('deleteFiles', mongoFn)(null, 'victim-2'),
+      );
+
+      expect(result).toEqual({ deletedCount: 4 });
+      expect(callConsoleFileRecordsProxy).not.toHaveBeenCalled();
+      expect(callConsoleFileRecordsProxy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+      expect(mongoFn).toHaveBeenCalledTimes(1);
+      expect(mongoFn).toHaveBeenCalledWith(null, 'victim-2');
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('F-A2'));
+    });
+
+    it('the live self-deletion shape (user === req.user.id, UserController.js:454) still sweeps BOTH stores — the guard does not over-block', async () => {
+      callConsoleFileRecordsProxy
+        .mockResolvedValueOnce({ items: [item('mine')], next_cursor: null })
+        .mockResolvedValueOnce({ items: [item('mine')] })
+        .mockResolvedValueOnce(undefined);
+      const mongoFn = jest.fn().mockResolvedValueOnce({ deletedCount: 1 });
+
+      const result = await runWithRequestAccessToken({ accessToken: 'tok', sub: 'u1' }, () =>
+        bind('deleteFiles', mongoFn)(null, 'u1'),
+      );
+
+      expect(result).toEqual({ deletedCount: 2 });
+      expect(callConsoleFileRecordsProxy).toHaveBeenCalledWith({
+        method: 'DELETE',
+        path: 'mine',
+        token: 'tok',
+      });
+      expect(mongoFn).toHaveBeenCalledWith(null, 'u1');
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('no token → MissingAccessTokenError BEFORE the subject check, nothing called (fail-closed order preserved)', async () => {
+      const mongoFn = jest.fn();
+      await expect(
+        runWithRequestAccessToken({ sub: 'admin-1' }, () =>
+          SOVEREIGN_METHOD_BINDERS.deleteFiles(undefined, mongoFn, {})(null, 'victim-2'),
+        ),
+      ).rejects.toBeInstanceOf(MissingAccessTokenError);
+      expect(mongoFn).not.toHaveBeenCalled();
+      expect(callConsoleFileRecordsProxy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  describe('F-A1 at the files level — the pre-wrapped ctx handles and the explicit Mongo-bound data', () => {
+    it('process.js:1143 shape updateFileUsage({file_id, user, tenantId: undefined}) for a LEGACY row: the Mongo fallback IS reached with the same data minus the undefined key (single-tenant deployments keep working through the closed hatch)', async () => {
+      callConsoleFileRecordsProxy.mockRejectedValueOnce(notFound());
+      const mongoFn = jest.fn().mockResolvedValueOnce({ file_id: 'legacy', usage: 2 });
+      const result = await bind(
+        'updateFileUsage',
+        mongoFn,
+      )({
+        file_id: 'legacy',
+        user: 'u1',
+        tenantId: undefined,
+      });
+      expect(result).toEqual({ file_id: 'legacy', usage: 2 });
+      expect(mongoFn).toHaveBeenCalledTimes(1);
+      expect(Object.keys(mongoFn.mock.calls[0][0])).toEqual(['file_id', 'user']);
+      expect(mongoFn.mock.calls[0][0]).toEqual({ file_id: 'legacy', user: 'u1' });
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('the ctx.mongoFn the files domain receives is the GUARDED handle: a strippable filter handed to it directly never reaches the raw Mongo function', async () => {
+      const mongoFn = jest
+        .fn()
+        .mockResolvedValue([{ file_id: 'ANOTHER-USERS-ROW', text: 'secret' }]);
+      let handle;
+      // Observe the ctx a real files impl is given, without changing the domain.
+      const spy = jest
+        .spyOn(filesAdapter.methods.getFiles, 'impl')
+        .mockImplementation(function observe(_args, ctx) {
+          handle = ctx.mongoFn;
+          return [];
+        });
+      try {
+        await bind('getFiles', mongoFn)({ file_id: 'x' }, null, {});
+      } finally {
+        spy.mockRestore();
+      }
+      expect(handle).not.toBe(mongoFn);
+      expect(await handle({ _id: undefined }, null, {})).toEqual([]);
+      expect(mongoFn).not.toHaveBeenCalled();
+      const safe = { file_id: 'shared' };
+      await handle(safe, null, {});
+      expect(mongoFn.mock.calls[0][0]).toBe(safe);
+    });
+
+    it('F-B2: Code/process.js:671 shape — the background harvest commit updateFile({...fileData, tenantId: undefined}, {$or: [...]}) REACHES Mongo with the data minus the undefined key and the extraFilter byte-identical, and returns the committed row (NEUTER: `mongoUpdateData` → identity → null, Mongo never called: RED)', async () => {
+      const committed = { file_id: 'code-1', filename: 'out.png', status: 'ready' };
+      const mongoFn = jest.fn().mockResolvedValueOnce(committed);
+      const fileData = {
+        file_id: 'code-1',
+        filename: 'out.png',
+        conversationId: 'c1',
+        user: 'u1',
+        tenantId: undefined,
+        metadata: { sourceDispatchedAt: 1000 },
+      };
+      const cas = {
+        $or: [
+          { 'metadata.sourceDispatchedAt': { $exists: false } },
+          { 'metadata.sourceDispatchedAt': { $lte: 1000 } },
+        ],
+      };
+
+      const result = await bind('updateFile', mongoFn)(fileData, cas);
+
+      expect(result).toBe(committed);
+      expect(mongoFn).toHaveBeenCalledTimes(1);
+      const [sentData, sentFilter] = mongoFn.mock.calls[0];
+      expect(Object.keys(sentData)).toEqual([
+        'file_id',
+        'filename',
+        'conversationId',
+        'user',
+        'metadata',
+      ]);
+      expect(sentData).toEqual({
+        file_id: 'code-1',
+        filename: 'out.png',
+        conversationId: 'c1',
+        user: 'u1',
+        metadata: { sourceDispatchedAt: 1000 },
+      });
+      expect(sentFilter).toBe(cas);
+      expect(callConsoleFileRecordsProxy).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('F-B2: the same restatement on the PLAIN updateFile fallback for a legacy row; a data bag with NO undefined key is forwarded as the SAME object reference; and a strippable extraFilter is STILL refused (the F6 mechanism is a filter, not a data bag)', async () => {
+      // legacy row, undefined key in the data bag → Mongo reached, key dropped
+      callConsoleFileRecordsProxy.mockRejectedValueOnce(notFound());
+      const mongoFn = jest.fn().mockResolvedValueOnce({ file_id: 'legacy', status: 'ready' });
+      await bind(
+        'updateFile',
+        mongoFn,
+      )({ file_id: 'legacy', status: 'ready', tenantId: undefined });
+      expect(mongoFn).toHaveBeenCalledTimes(1);
+      expect(mongoFn.mock.calls[0][0]).toEqual({ file_id: 'legacy', status: 'ready' });
+      expect(Object.keys(mongoFn.mock.calls[0][0])).not.toContain('tenantId');
+
+      // no undefined key → the caller's object itself is what Mongo sees
+      const clean = { file_id: 'mine', status: 'failed' };
+      const cas = { status: 'pending' };
+      const mongoFn2 = jest.fn().mockResolvedValueOnce(null);
+      await bind('updateFile', mongoFn2)(clean, cas);
+      expect(mongoFn2.mock.calls[0][0]).toBe(clean);
+      expect(mongoFn2.mock.calls[0][1]).toBe(cas);
+
+      // a strippable FILTER is still short-circuited by the base
+      const mongoFn3 = jest.fn().mockResolvedValueOnce({ file_id: 'x' });
+      expect(
+        await bind('updateFile', mongoFn3)(
+          { file_id: 'x', status: 'y' },
+          { previewRevision: undefined },
+        ),
+      ).toBeNull();
+      expect(mongoFn3).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('updateFile short-circuited'),
+      );
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  describe('F-A3 — the own-list branch NEVER falls through to Mongo (disclosure accuracy)', () => {
+    it('{user: <someone else>} (no id key) returns [] from the sovereign LIST endpoint and Mongo is NOT consulted — unlike the id-shaped branch; the docstring states it', async () => {
+      callConsoleFileRecordsProxy.mockResolvedValueOnce({
+        items: [item('mine')],
+        next_cursor: null,
+      });
+      const mongoFn = jest.fn().mockResolvedValue([{ file_id: 'theirs', legacy: true }]);
+      const result = await runWithRequestAccessToken({ accessToken: 'tok', sub: 'u1' }, () =>
+        bind('getFiles', mongoFn)({ user: 'someone-else' }, null, {}),
+      );
+      expect(result).toEqual([]);
+      expect(mongoFn).not.toHaveBeenCalled();
+      expect(callConsoleFileRecordsProxy).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'GET', path: '' }),
+      );
+      const src = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8');
+      expect(src).toMatch(/OWN-LIST shape[\s\S]*NEVER falls through to Mongo/);
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
   describe('residual + errors', () => {
     it('a residual getFiles shape (no id, no owner) defers to Mongo UNCHANGED (DISCLOSED CONSEQUENCE §6)', async () => {
       const mongoFn = jest.fn().mockResolvedValueOnce([]);
