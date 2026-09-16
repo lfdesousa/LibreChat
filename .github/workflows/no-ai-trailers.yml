@@ -1,8 +1,12 @@
 name: No AI Trailers
 
-# Layer 3 of the no-AI-trailer guard, and the only layer `--no-verify` cannot
-# reach: once this job is a required check, a commit carrying a
-# `Co-Authored-By:` or `Claude-Session:` trailer cannot be merged.
+# Layer 3 of the no-AI-trailer guard. Layers 1 and 2 are local hooks, which
+# `--no-verify`, `HUSKY=0`, `core.hooksPath` and `~/.config/husky/init.sh` all
+# switch off, and which a fresh clone does not have at all until `npm install`
+# generates `.husky/_`. This job runs server-side instead, so it is the layer
+# that binds a merge — once an operator marks it a required status check in
+# branch protection. Until that toggle is set it reports, and does not block;
+# the guard's own header comment says the same rather than assuming it.
 #
 # There is deliberately NO `paths:` filter — a path filter would let a PR that
 # touches none of the listed paths skip the check entirely, which is the hole

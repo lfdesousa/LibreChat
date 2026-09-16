@@ -14,6 +14,15 @@
 #   B. pre-push hook     (.husky/pre-push)     — refuses the push
 #   C. range mode        (the CI job)          — refuses the PR
 #
+# Two further groups exist because a guard can fail without firing:
+#
+#   N/S. normalization — the text the guard declines to scan. S1-S4 are real
+#        `git commit` side-effect controls for message shapes git KEEPS; S5
+#        pins the one boundary layer 1 leaves open and proves layer 2 covers it.
+#   FC.  fail-closed — a scan set the guard could not enumerate must be
+#        REFUSED. These reach the error branches through the environment (an
+#        unresolvable oid, a stubbed tool), never by editing the guard.
+#
 # To prove any single layer non-vacuous, neuter THAT layer alone (comment out
 # the invocation in its hook, or one alternative in the predicate), re-run, and
 # confirm the matching positive control flips to ACCEPTED. Never neuter more
@@ -66,6 +75,12 @@ section() {
 # refs to the fork's origin. Every helper that takes a repo path asserts first.
 assert_sandbox() {
   case "${1:-}" in
+    # `..` is rejected before the prefix test: "$WORKDIR/../../etc" has the
+    # right prefix and is not in the sandbox.
+    *..*)
+      printf 'FATAL: refusing a path containing "..": %s\n' "${1:-<empty>}" >&2
+      exit 1
+      ;;
     "$WORKDIR"/*) ;;
     *)
       printf 'FATAL: refusing to operate on %s (outside %s)\n' "${1:-<empty>}" "$WORKDIR" >&2
@@ -193,6 +208,68 @@ commit_bypassing_hook() {
   git -C "$repo" add seed.txt
   printf '%s\n' "$body" >"$repo/.git/TEST_MSG"
   git -C "$repo" commit --quiet --no-verify -F "$repo/.git/TEST_MSG" >/dev/null 2>&1
+}
+
+# git's literal cut line, byte-for-byte as wt_status_locate_end() matches it:
+# the comment character, a space, then the marker. Built here independently of
+# the guard so the controls do not inherit the guard's own idea of it.
+GIT_CUT_LINE='# ------------------------ >8 ------------------------'
+
+# Run the guard directly in a sandbox repo and report refused/accepted by exit
+# status. Used for the fail-closed branches, whose observable IS the refusal:
+# there is no commit to count when the guard declines to enumerate a range.
+run_guard() {
+  local repo="$1"
+  shift
+  assert_sandbox "$repo"
+  if (cd "$repo" && ./scripts/check-no-ai-trailers.sh "$@" >/dev/null 2>&1); then
+    echo accepted
+  else
+    echo refused
+  fi
+}
+
+expect_guard_refuses() {
+  local label="$1" repo="$2"
+  shift 2
+  if [ "$(run_guard "$repo" "$@")" = refused ]; then
+    ok "$label"
+  else
+    ko "$label" 'the guard exited 0; an unenumerable scan set was reported clean'
+  fi
+}
+
+# Feed git's pre-push protocol to the REAL hook, exactly as git does.
+run_pre_push_hook() {
+  local repo="$1" line="$2"
+  assert_sandbox "$repo"
+  if printf '%s\n' "$line" | (cd "$repo" && ./.githooks/pre-push origin >/dev/null 2>&1); then
+    echo accepted
+  else
+    echo refused
+  fi
+}
+
+# Put a stub earlier in PATH so a named tool fails, then run the guard. This is
+# how the "the scanner itself errored" branches are reached without touching
+# the guard: the failure is injected into the environment, not the code.
+run_guard_with_broken_tool() {
+  local repo="$1" tool="$2"
+  shift 2
+  assert_sandbox "$repo"
+  # A FRESH stub directory per call. Sharing one directory let the previous
+  # call's stub stay on PATH, so the next control passed because of the WRONG
+  # broken tool.
+  local bindir="$repo/brokenbin-$tool"
+  rm -rf "$bindir"
+  mkdir -p "$bindir"
+  printf '#!/bin/sh\nexit 2\n' >"$bindir/$tool"
+  chmod +x "$bindir/$tool"
+  if (cd "$repo" && PATH="$bindir:$PATH" ./scripts/check-no-ai-trailers.sh "$@" >/dev/null 2>&1); then
+    echo accepted
+  else
+    echo refused
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -364,22 +441,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-section 'MESSAGE NORMALIZATION - git --verbose diffs must not false-positive'
+section 'MESSAGE NORMALIZATION - drop only what git drops, never a real trailer'
 # ---------------------------------------------------------------------------
+# Verified against git 2.43 in a sandbox: the commit-msg hook is handed the
+# `git commit -v` message WITH the diff still attached (git truncates after the
+# hook runs), so the below-the-cut-line drop is load-bearing for N1. Equally
+# verified: `git commit -F` runs cleanup=whitespace, under which git keeps a
+# scissors-SHAPED line, keeps a real cut line, and keeps comment lines — which
+# is what S1-S4 and FC7 pin.
 VERBOSE_MSG="$WORKDIR/verbose-msg"
 {
   printf 'feat: edit the guard fixtures\n\n'
   printf '# Please enter the commit message for your changes.\n'
   printf '# %s\n' "$TRAILER_CLAUDE"
-  printf '# ------------------------ >8 ------------------------\n'
+  printf '%s\n' "$GIT_CUT_LINE"
   printf 'diff --git a/x b/x\n'
   printf ' %s\n' "$TRAILER_CLAUDE"
   printf '+%s\n' "$TRAILER_SESSION"
 } >"$VERBOSE_MSG"
 if (cd "$REPO_ROOT" && "$GUARD" --message "$VERBOSE_MSG" >/dev/null 2>&1); then
-  ok 'N1 commented lines and the verbose diff below the scissors are ignored'
+  ok 'N1 commented lines and the verbose diff below git cut line are ignored'
 else
-  ko 'N1 commented lines and the verbose diff below the scissors are ignored' \
+  ko 'N1 commented lines and the verbose diff below git cut line are ignored' \
     'the guard fired on text git itself strips from the message'
 fi
 
@@ -387,13 +470,165 @@ REAL_MSG="$WORKDIR/real-msg"
 {
   printf 'feat: edit the guard fixtures\n\n'
   printf '%s\n' "$TRAILER_CLAUDE"
-  printf '# ------------------------ >8 ------------------------\n'
+  printf '%s\n' "$GIT_CUT_LINE"
   printf 'diff --git a/x b/x\n'
 } >"$REAL_MSG"
 if (cd "$REPO_ROOT" && "$GUARD" --message "$REAL_MSG" >/dev/null 2>&1); then
-  ko 'N2 a real trailer ABOVE the scissors is still caught' 'the normalizer swallowed a real trailer'
+  ko 'N2 a real trailer ABOVE the cut line is still caught' 'the normalizer swallowed a real trailer'
 else
-  ok 'N2 a real trailer ABOVE the scissors is still caught'
+  ok 'N2 a real trailer ABOVE the cut line is still caught'
+fi
+
+# S1-S4 are SIDE-EFFECT controls: a real `git commit`, asserting the commit was
+# never created. Each is a message shape git KEEPS in full, so a trailer under
+# it is a real, git-recognised, attributable trailer.
+expect_commit_refused 'S1 trailer below an UNCOMMENTED scissors-shaped line refused' \
+  "feat: a perfectly normal looking change
+
+------------------------ >8 ------------------------
+
+$TRAILER_CLAUDE"
+expect_commit_refused 'S2 trailer below a no-space scissors lookalike refused' \
+  "feat: a perfectly normal looking change
+
+-------->8
+
+$TRAILER_CLAUDE"
+expect_commit_refused 'S3 trailer below an em-dash scissors lookalike refused' \
+  "feat: a perfectly normal looking change
+
+--------— >8 --------
+
+$TRAILER_SESSION"
+expect_commit_refused 'S4 column-0 trailer below git REAL cut line refused (-F keeps it)' \
+  "feat: a perfectly normal looking change
+
+$GIT_CUT_LINE
+diff --git a/x b/x
+
+$TRAILER_CLAUDE"
+
+# S5 pins the DISCLOSED boundary rather than asserting it away: layer 1 lets a
+# blank-indented trailer below both a real cut line and a real `diff --git`
+# line through (it is not distinguishable from diff context), and layer 2
+# refuses it. The assertion is the side effect on BOTH halves: the commit is
+# created, and the remote ref does not move.
+new_repo s5-boundary
+S5_REPO="$REPO"
+attach_remote "$S5_REPO"
+S5_BODY="feat: a perfectly normal looking change
+
+$GIT_CUT_LINE
+diff --git a/x b/x
+ $TRAILER_CLAUDE"
+if [ "$(try_commit "$S5_REPO" "$S5_BODY")" = created ]; then
+  ok 'S5a layer 1 boundary is where it is documented (indented trailer under a real diff)'
+else
+  ko 'S5a layer 1 boundary is where it is documented' \
+    'layer 1 refused it; the disclosed boundary no longer matches the code'
+fi
+if [ "$(try_push "$S5_REPO")" = rejected ]; then
+  ok 'S5b layer 2 refuses the S5a shape (remote ref did not move)'
+else
+  ko 'S5b layer 2 refuses the S5a shape' 'the remote ref MOVED; the boundary is not covered downstream'
+fi
+
+# S6 pins the OTHER side of the same condition: without a `diff --git ` line
+# below the cut line there is no diff to be confused with, so nothing is
+# dropped and the indented trailer is refused. S5a and S6 together fix the
+# boundary at exactly one place instead of leaving it a matter of taste.
+expect_commit_refused 'S6 indented trailer below a cut line with NO diff refused' \
+  "feat: a perfectly normal looking change
+
+$GIT_CUT_LINE
+
+ $TRAILER_CLAUDE"
+
+# S7 pins the WHOLE-LINE match against git's literal cut line. An approximate
+# marker match ("looks like scissors") would open the S5a boundary to any
+# lookalike an author can type; requiring git's own line keeps that boundary to
+# the one marker git itself acts on. Same shape as S5a, lookalike marker.
+expect_commit_refused 'S7 indented trailer below a LOOKALIKE marker + diff refused' \
+  "feat: a perfectly normal looking change
+
+------------------------ >8 ------------------------
+diff --git a/x b/x
+ $TRAILER_CLAUDE"
+
+# ---------------------------------------------------------------------------
+section 'FAIL-CLOSED - an unenumerable scan set is refused, never passed'
+# ---------------------------------------------------------------------------
+new_repo failclosed
+FC_REPO="$REPO"
+attach_remote "$FC_REPO"
+commit_bypassing_hook "$FC_REPO" "feat: the trailer-bearing tip
+
+$TRAILER_CLAUDE"
+FC_TIP="$(git -C "$FC_REPO" rev-parse HEAD)"
+FC_UNKNOWN='0123456789012345678901234567890123456789'
+
+expect_guard_refuses 'FC1 --range over an unresolvable range refused' \
+  "$FC_REPO" --range "$FC_UNKNOWN..$FC_TIP"
+
+if [ "$(run_pre_push_hook "$FC_REPO" "refs/heads/main $FC_TIP refs/heads/main $FC_UNKNOWN")" = refused ]; then
+  ok 'FC2 --pre-push with an unknown remote oid refused (the F-2 shape)'
+else
+  ko 'FC2 --pre-push with an unknown remote oid refused' \
+    'the hook exited 0; the push would be allowed with the range unscanned'
+fi
+
+FC_ZERO='0000000000000000000000000000000000000000'
+if [ "$(run_pre_push_hook "$FC_REPO" "refs/heads/x $FC_UNKNOWN refs/heads/x $FC_ZERO")" = refused ]; then
+  ok 'FC3 --pre-push first push with an unknown local oid refused'
+else
+  ko 'FC3 --pre-push first push with an unknown local oid refused' 'the hook exited 0'
+fi
+
+expect_guard_refuses 'FC4 --commit on an unresolvable rev refused' \
+  "$FC_REPO" --commit "$FC_UNKNOWN"
+
+# FC8: an oid that EXISTS but is not a commit. `git show -s --format=%B <blob>`
+# exits 0 and prints the blob's CONTENT, so a scan that skipped the
+# object-type check would happily scan a file and call the result a clean
+# commit message.
+FC_BLOB="$(git -C "$FC_REPO" rev-parse HEAD:seed.txt)"
+expect_guard_refuses 'FC8 --commit on a non-commit object refused' \
+  "$FC_REPO" --commit "$FC_BLOB"
+
+# Control: the SAME hook invocation with the correct remote oid still refuses
+# because of the trailer, so FC2 is about enumeration and not about the shape.
+if [ "$(run_pre_push_hook "$FC_REPO" "refs/heads/main $FC_TIP refs/heads/main $(git -C "$FC_REPO" rev-parse HEAD~1)")" = refused ]; then
+  ok 'FC2c the correct-oid control also refuses (on the trailer)'
+else
+  ko 'FC2c the correct-oid control also refuses' 'the trailer-bearing range was accepted'
+fi
+
+FC_CLEAN_MSG="$WORKDIR/fc-clean-msg"
+printf 'feat: a perfectly ordinary commit\n' >"$FC_CLEAN_MSG"
+if [ "$(run_guard_with_broken_tool "$FC_REPO" grep --message "$FC_CLEAN_MSG")" = refused ]; then
+  ok 'FC5 a scanner error refuses (a clean message, unscannable)'
+else
+  ko 'FC5 a scanner error refuses' 'the guard exited 0 on a stream it never read'
+fi
+if [ "$(run_guard_with_broken_tool "$FC_REPO" awk --message "$FC_CLEAN_MSG")" = refused ]; then
+  ok 'FC6 a normalizer error refuses (a clean message, unnormalizable)'
+else
+  ko 'FC6 a normalizer error refuses' 'the guard exited 0 on a message it never normalized'
+fi
+
+# FC7: `core.commentChar` is user-configurable and git accepts a letter. With
+# `C`, an unconditional comment rule would treat the trailer itself as
+# commentary. Side-effect control: the commit must not be created.
+new_repo commentchar
+FC7_REPO="$REPO"
+git -C "$FC7_REPO" config core.commentChar C
+if [ "$(try_commit "$FC7_REPO" "feat: thing
+
+$TRAILER_CLAUDE")" = refused ]; then
+  ok 'FC7 core.commentChar=C does not let the comment rule swallow a trailer'
+else
+  ko 'FC7 core.commentChar=C does not let the comment rule swallow a trailer' \
+    'the commit WAS created; the comment rule dropped a real trailer'
 fi
 
 # ---------------------------------------------------------------------------
@@ -410,6 +645,12 @@ if grep -qE '^ *paths:' "$WORKFLOW"; then
 else
   ok 'W2 CI workflow has no paths filter'
 fi
+# paths-ignore is the same hole worn the other way round.
+if grep -qE '^ *paths-ignore:' "$WORKFLOW"; then
+  ko 'W2b CI workflow has no paths-ignore filter' 'a paths-ignore filter lets a PR skip the check entirely'
+else
+  ok 'W2b CI workflow has no paths-ignore filter'
+fi
 if grep -qE 'check-no-ai-trailers\.sh" --message' "$REPO_ROOT/.husky/commit-msg"; then
   ok 'W3 commit-msg hook invokes the guard'
 else
@@ -419,6 +660,20 @@ if grep -qE 'check-no-ai-trailers\.sh" --pre-push' "$REPO_ROOT/.husky/pre-push";
   ok 'W4 pre-push hook invokes the guard'
 else
   ko 'W4 pre-push hook invokes the guard' 'the pre-push hook no longer calls the guard'
+fi
+CODEOWNERS="$REPO_ROOT/.github/CODEOWNERS"
+W5_MISSING=''
+for W5_PATH in \
+  '/scripts/check-no-ai-trailers.sh' \
+  '/scripts/check-no-ai-trailers.test.sh' \
+  '/.github/workflows/no-ai-trailers.yml'; do
+  grep -qF "$W5_PATH" "$CODEOWNERS" 2>/dev/null || W5_MISSING="$W5_MISSING $W5_PATH"
+done
+if [ -z "$W5_MISSING" ]; then
+  ok 'W5 CODEOWNERS covers the guard, its matrix and its workflow'
+else
+  ko 'W5 CODEOWNERS covers the guard, its matrix and its workflow' \
+    "unowned:$W5_MISSING - one PR could weaken all three and pass its own test"
 fi
 
 printf '\n%s\n' '-----------------------------------------------'

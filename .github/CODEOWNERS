@@ -1,0 +1,17 @@
+# Code owners.
+#
+# The trailer guard is a guardrail on the assistant's own commit messages, and
+# its `guard-self-test` CI job runs the acceptance matrix of the pull request it
+# is checking. Without an owner on these paths, one pull request could weaken
+# the predicate, weaken the matrix and edit the workflow together, pass its own
+# weakened test, and go green. Requiring a named human review on exactly these
+# three paths is what keeps the guard from validating itself.
+#
+# NOTE: a CODEOWNERS entry only binds once branch protection on the default
+# branch has "Require review from Code Owners" enabled. That toggle is an
+# operator action in the repository settings, not something this file can do.
+
+/scripts/check-no-ai-trailers.sh         @lfdesousa
+/scripts/check-no-ai-trailers.test.sh    @lfdesousa
+/.github/workflows/no-ai-trailers.yml    @lfdesousa
+/.github/CODEOWNERS                      @lfdesousa

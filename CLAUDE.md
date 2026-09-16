@@ -228,6 +228,15 @@ from `.husky/pre-push`, and from the `No AI Trailers` CI workflow over the
 pull request's own commits. Fix an offending commit with `git commit --amend`
 or `git rebase -i`; `--no-verify` only defers it to CI.
 
+The local hooks are best-effort by construction (`--no-verify`, `HUSKY=0`,
+`core.hooksPath`, `~/.config/husky/init.sh`, and a fresh clone that has not run
+`npm install` yet all bypass them); the CI job is the layer that binds a merge.
+The full list of known residual bypasses is kept in the header comment of
+`scripts/check-no-ai-trailers.sh`, and `.github/CODEOWNERS` names an owner for
+the guard, its acceptance matrix and its workflow, so that once branch
+protection requires code-owner review a single pull request no longer weakens
+all three at once and passes its own weakened test.
+
 ---
 
 ## Formatting
