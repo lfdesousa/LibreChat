@@ -222,6 +222,34 @@ describe('AuditTraceConversationTags — the conversation-tags domain ON the sov
       await withToken(() => bind('createConversationTag', mongoFn)('lc-user-1', undefined));
       expect(mongoFn).toHaveBeenLastCalledWith('lc-user-1', {});
     });
+
+    it('F7 (review reject / ADDENDUM F R1): a "." or ".." tag is refused by the idempotency PRE-READ before `this.create` is ever reached — the surface table\'s corrected `createConversationTag` row', async () => {
+      // Simulates the REAL client's `encodeTagPath` refusal (pinned at the
+      // client boundary by client.spec.js / client.resolvedUrl.spec.js —
+      // not re-litigated here); this test pins the COMPOSITION this
+      // domain owns: `this.readOne(src.tag, ...)` runs BEFORE `this.create`
+      // in `createConversationTag`'s impl, so the SAME guard that protects
+      // GET/DELETE also protects CREATE, and `this.create`'s JSON-body
+      // write is structurally unreachable for such a name.
+      callConsoleConversationTagsProxy.mockImplementation(async ({ method, path }) => {
+        if (method === 'GET' && (path === '.' || path === '..')) {
+          throw new SovereignMemoryError(
+            '[AuditTraceConversationTags] a tag segment of "." or ".." would escape the ' +
+              'conversation-tags path when the request URL is resolved — refused (fail-closed)',
+            400,
+          );
+        }
+        throw new Error(`unexpected call: ${method} ${path}`);
+      });
+      await expect(
+        withToken(() => bind('createConversationTag')('lc-user-1', { tag: '..' })),
+      ).rejects.toMatchObject({ status: 400 });
+      // THE SIDE EFFECT: exactly the ONE pre-read GET was attempted —
+      // `this.create`'s POST never ran, because the pre-read throws before
+      // `impl` can reach it.
+      expect(callConsoleConversationTagsProxy).toHaveBeenCalledTimes(1);
+      expect(callConsoleConversationTagsProxy.mock.calls[0][0].method).toBe('GET');
+    });
   });
 
   // ────────────────────────────────────────────────────────────────────────
@@ -347,20 +375,43 @@ describe('AuditTraceConversationTags — the conversation-tags domain ON the sov
         bind('deleteConversationTags', mongoFn)({ user: 'lc-user-1' }),
       );
       expect(result).toBe(2 + 3);
-      // The Mongo sweep excludes (by name) every tag the sovereign sweep
-      // already deleted (2026-09-17 review "ALSO FIX": the pre-fix version
-      // of this call forwarded the ORIGINAL {user} filter unchanged and
-      // would double-count a tag present in both stores under the SAME
-      // name — see DISCLOSED CONSEQUENCE §4 in index.js).
-      expect(mongoFn).toHaveBeenCalledWith({ user: 'lc-user-1', tag: { $nin: ['a', 'b'] } });
+      // REVERTED 2026-09-17, fix round 2 (review reject F6 / ADDENDUM F
+      // R2): the Mongo sweep runs the ORIGINAL, un-narrowed `{user}`
+      // filter — see DISCLOSED CONSEQUENCE §4 in index.js. A fix-round-1
+      // `tag: {$nin: [...]}` narrowing "fixed" an unobserved over-count
+      // (the return value is discarded by its one live caller,
+      // `UserController.js:459`) by turning it into an under-DELETE on
+      // the account-deletion path — see the real-semantics case below.
+      expect(mongoFn).toHaveBeenCalledWith({ user: 'lc-user-1' });
     });
 
-    it('excludes same-named sovereign-deleted tags from the Mongo sweep so a duplicate is not double-counted', async () => {
+    it('REAL deleteMany semantics: the un-narrowed Mongo sweep leaves NO row behind for a same-named duplicate (F6 / ADDENDUM F R2-R3 — real semantics, not a mocked return value)', async () => {
       // A tag named "dup" exists in BOTH stores (DISCLOSED CONSEQUENCE §1's
-      // bookmark-flow duplicate shape). Without the exclusion, summing the
-      // sovereign deletedCount (1) and the Mongo deletedCount (1, since
-      // Mongo's OWN deleteMany would also match "dup") would report "2
-      // tags deleted" for what the caller experiences as ONE tag name.
+      // bookmark-flow duplicate shape). This fake `mongoFn` implements the
+      // REAL `deleteMany`-shaped matching (including `$nin`) against an
+      // in-memory document array — not a mocked count chosen by the
+      // author (2026-09-17 review reject F6 / ADDENDUM F R3: "a mock
+      // cannot fail on a step it never performs"). If the `$nin`
+      // narrowing this round reverts is ever reintroduced, THIS test goes
+      // RED on the side effect (a document survives in `mongoDocs`), not
+      // on a call-argument assertion alone.
+      const mongoDocs = [{ user: 'lc-user-1', tag: 'dup' }];
+      const realDeleteMany = jest.fn(async (filter) => {
+        const excluded =
+          filter && filter.tag && Array.isArray(filter.tag.$nin) ? new Set(filter.tag.$nin) : null;
+        const before = mongoDocs.length;
+        for (let i = mongoDocs.length - 1; i >= 0; i -= 1) {
+          const doc = mongoDocs[i];
+          if (doc.user !== filter.user) {
+            continue;
+          }
+          if (excluded && excluded.has(doc.tag)) {
+            continue; // real Mongo semantics: an $nin-excluded doc SURVIVES
+          }
+          mongoDocs.splice(i, 1);
+        }
+        return before - mongoDocs.length;
+      });
       callConsoleConversationTagsProxy.mockImplementation(async ({ method, path }) => {
         if (method === 'GET' && path === '') {
           return { items: [row('dup')], next_cursor: null };
@@ -373,17 +424,15 @@ describe('AuditTraceConversationTags — the conversation-tags domain ON the sov
         }
         throw new Error(`unexpected call: ${method} ${path}`);
       });
-      const mongoFn = jest.fn().mockResolvedValue(1);
-      const result = await withToken(() =>
-        bind('deleteConversationTags', mongoFn)({ user: 'lc-user-1' }),
-      );
-      expect(mongoFn).toHaveBeenCalledWith({ user: 'lc-user-1', tag: { $nin: ['dup'] } });
-      // Sovereign deletedCount (1) + whatever Mongo's OWN filtered sweep
-      // reports for the NARROWED filter (asserted above to exclude "dup").
-      expect(result).toBe(1 + 1);
+      await withToken(() => bind('deleteConversationTags', realDeleteMany)({ user: 'lc-user-1' }));
+      expect(realDeleteMany).toHaveBeenCalledWith({ user: 'lc-user-1' });
+      // THE SIDE EFFECT: after the account-deletion-shaped sweep, no
+      // "dup" row (or any row for this user) remains in the Mongo-side
+      // store — the retention gap F6 named is closed.
+      expect(mongoDocs).toEqual([]);
     });
 
-    it('when the caller has NO sovereign tags, the Mongo filter is forwarded unchanged (no empty-array narrowing noise)', async () => {
+    it('when the caller has NO sovereign tags, the Mongo filter is forwarded unchanged (the general case — there is no narrowing to add noise to)', async () => {
       callConsoleConversationTagsProxy.mockResolvedValue({ items: [], next_cursor: null });
       const mongoFn = jest.fn().mockResolvedValue(0);
       await withToken(() => bind('deleteConversationTags', mongoFn)({ user: 'lc-user-1' }));

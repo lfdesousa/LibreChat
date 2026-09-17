@@ -7,8 +7,15 @@
  * AS FURTHER AMENDED by
  * `2026-09-17-SPEC-ADDENDUM-E-enumerate-WHERE-a-value-lands-not-just-WHO-supplied-it.md`
  * (the F1 path-traversal fix round — `../client.js::encodeTagPath`,
- * DISCLOSED CONSEQUENCES §§1/2/7/8/9 below), which WINS: this module
- * writes NO read/fallthrough/owner-stamping/
+ * DISCLOSED CONSEQUENCES §§1/2/7/8/9 below)
+ * AS FURTHER AMENDED by
+ * `2026-09-17-SPEC-ADDENDUM-F-apply-the-principle-to-every-row-not-the-cited-one.md`
+ * (the fix-round-2 corrections below: §4's `deleteConversationTags`
+ * dedup reverted to the un-narrowed Mongo sweep — F6; the surface table
+ * re-derived to cover `createConversationTag`'s TWO interpolation sites
+ * and `bulkIncrementTagCounts`'s caller-supplied tag list — F7;
+ * DISCLOSED CONSEQUENCE §9 rewritten to the true, route-traced
+ * behaviour — F8), which WINS: this module writes NO read/fallthrough/owner-stamping/
  * undefined-key-guard/clobber-merge logic of its own — every one of
  * those lives in `../AuditTraceSovereignAdapter` and is proven there
  * ONCE. `../AuditTraceFiles` is the reference adopter this module
@@ -198,11 +205,29 @@
  *     other shape today (the enumeration above), so this is the SAME
  *     "residual filter, no sovereign query surface for it" boundary
  *     `classifyFilter` already names for reads, restated for this
- *     domain's one write-by-filter method. For the ONE wired `{user}`
- *     shape, the Mongo sweep that follows the sovereign one EXCLUDES
- *     (by name, `tag: {$nin: ownTags}`) every tag the sovereign sweep
- *     already deleted, so a §1-style same-named duplicate across both
- *     stores is not counted twice in the returned `deletedCount`.
+ *     domain's one write-by-filter method. **For the ONE wired `{user}`
+ *     shape, the Mongo sweep that follows the sovereign one runs the
+ *     ORIGINAL, UN-NARROWED `{user}` filter (2026-09-17 review reject F6
+ *     / ADDENDUM F R2 — reverted from a fix-round-1 `tag: {$nin: ownTags}`
+ *     narrowing that traded an over-count for an under-DELETE):** Mongo's
+ *     `deleteConversationTags` is `ConversationTag.deleteMany(filter)`
+ *     (`packages/data-schemas/src/methods/conversationTag.ts`), so
+ *     narrowing the FILTER narrows the DELETE, not just the count — a
+ *     §1-style same-named duplicate (a Mongo-side row left behind by the
+ *     `addToConversation` bookmark-flow deferral) would have SURVIVED
+ *     account deletion (`UserController.js:459`'s
+ *     `db.deleteConversationTags({user: user.id})`, whose return value is
+ *     discarded — the "double count" the narrowing fixed was never
+ *     observed by any live caller). Consequence, disclosed rather than
+ *     silently accepted: `sovereign.deletedCount + mongoCount` MAY
+ *     over-count a §1-style duplicate by 1 per duplicated name (Mongo's
+ *     own sweep still matches and deletes it, so nothing survives, but
+ *     the returned total double-counts a tag the caller experiences as
+ *     ONE name) — an inflated, purely informational number on a return
+ *     value no live caller reads, accepted in preference to the
+ *     under-delete the narrowing introduced. See
+ *     `index.spec.js`'s "the un-narrowed Mongo sweep leaves no row behind"
+ *     case for the real-`deleteMany`-semantics proof.
  *  5. **`updateTagsForConversation` stays 100% Mongo-native.** See the
  *     enumeration above for why. Consequence: a conversation that is
  *     itself sovereign but whose tags are edited via this route
@@ -248,18 +273,52 @@
  *     `deleteConversationTags({user})` call cannot assume "all or
  *     nothing" — some of the caller's tags, in either store, may already
  *     be gone.
- *  9. **A tag whose name is exactly `.` or `..` can be CREATED (the
- *     create body carries it as JSON, never a URL path segment) but can
- *     never be fetched, updated or deleted BY THAT NAME afterward** — the
- *     2026-09-17 F1 fix (`./client.js::encodeTagPath`) refuses a `.`/`..`
- *     path segment on every GET/DELETE call, fail-closed, because that
- *     segment would otherwise escape this domain's own BFF path prefix
- *     when the request URL is resolved. Such a tag still appears in
- *     `getConversationTags`'s list output; only its by-id operations are
- *     affected. Not reachable through the LibreChat UI's tag editor today
- *     (no live call site names a `.`/`..` tag) — named because the base's
- *     own "no absolutes without proof" discipline requires it, not
- *     because it is a live gap.
+ *  9. **REWRITTEN 2026-09-17, fix round 2 (review reject F8 / ADDENDUM F
+ *     R5) — the prior wording was wrong on both halves.**
+ *
+ *     **A tag whose name is exactly `.` or `..` CANNOT be created
+ *     sovereignly through this fork at all.** `createConversationTag`'s
+ *     impl performs an idempotency PRE-READ, `this.readOne(src.tag, ...)`,
+ *     BEFORE it ever calls `this.create` — and `readOne` → `fetchRaw` →
+ *     `callProxy({path: id})` interpolates `src.tag` into a URL PATH
+ *     SEGMENT via the SAME `encodeTagPath` the F1 fix hardened, which
+ *     refuses `.`/`..` with a 400 fail-closed, before any HTTP request is
+ *     issued. `this.create`'s own JSON-body write is never reached for
+ *     such a name (see the re-derived surface table in the fix-round-2
+ *     build record for both interpolation sites). Through the ONE route
+ *     consumer, `routes/tags.js`'s `POST /`, the thrown `SovereignMemoryError`
+ *     is caught by that handler's generic `catch` and answered as
+ *     **HTTP 500 `{"error": "Internal server error"}`** — the underlying
+ *     400 status is never read by that handler.
+ *
+ *     **A `.`/`..`-named row CAN still exist sovereignly** — not created
+ *     through this fork, but through the orchestrator's own
+ *     `/console/conversation-tags` write path directly (its body-field
+ *     validation does not refuse `.`/`..`) or carried over by a Mongo
+ *     migration. For such a PRE-EXISTING row, *"only its by-id operations
+ *     are affected" is false*: with `batchGet: null` for this domain,
+ *     `deleteConversationTags({user})` — **the account-deletion sweep**,
+ *     `UserController.js:459`'s `db.deleteConversationTags({user:
+ *     user.id})` — resolves the caller's own tag ids via `deleteByIds` →
+ *     `resolveByIds`'s per-id `fetchRaw` FAN-OUT (no batch-get route for
+ *     this domain), and `fetchRaw` swallows ONLY a 404; the `.`/`..`
+ *     segment's 400 propagates OUT of `resolveByIds`, out of
+ *     `deleteByIds`, out of this method's `impl`. `UserController.js`'s
+ *     call site has no `try/catch` around it, so the exception reaches
+ *     `deleteUserController`'s outer `catch`, which restores the fenced
+ *     schedule-suspension state and answers the WHOLE account-deletion
+ *     request **HTTP 500 `{"message": "Something went wrong."}`** —
+ *     `deleteUserById` is never reached; account deletion is aborted
+ *     entirely, not partially, and there is no in-product way to remove
+ *     the offending row afterward (`deleteConversationTag`'s own by-id
+ *     delete throws the identical 400). The tag still appears in
+ *     `getConversationTags`'s list output (list pagination never calls
+ *     `encodeTagPath`). Not reachable through the LibreChat UI's tag
+ *     editor today (no live call site NAMES a `.`/`..` tag) — the residual
+ *     gap is the orchestrator's own direct-write path and Mongo-migration
+ *     carryover, both outside this fork's control; named because the
+ *     base's own "no absolutes without proof" discipline requires it, not
+ *     because it is exercised by any live call site today.
  *
  * **Chokepoint:** this module exports ONLY its adapter + binders. The
  * sovereign-vs-Mongo decision stays in
@@ -459,16 +518,19 @@ class AuditTraceConversationTagsAdapter extends AuditTraceSovereignAdapter {
               token,
               fallback: async () => ({ deletedCount: 0 }),
             });
-            // Excludes by NAME every tag the sovereign sweep above already
-            // removed, so a Mongo-native duplicate of the SAME tag name
-            // (DISCLOSED CONSEQUENCE §1 — the addToConversation Mongo
-            // deferral can leave a same-named row in each store) is not
-            // counted a second time by Mongo's own `deleteMany`. `$nin: []`
-            // when `ownTags` is empty matches everything, i.e. a no-op
-            // narrowing — the filter still reduces to the caller's own
-            // {user} scope in that case.
-            const mongoFilter = ownTags.length > 0 ? { ...filter, tag: { $nin: ownTags } } : filter;
-            const mongoCount = await this.deferToMongo(ctx, [mongoFilter]);
+            // REVERTED 2026-09-17, fix round 2 (review reject F6 / ADDENDUM
+            // F R2): the Mongo sweep runs the ORIGINAL, un-narrowed `filter`
+            // — see DISCLOSED CONSEQUENCE §4 for why. Mongo's own
+            // `deleteConversationTags` is `ConversationTag.deleteMany(filter)`
+            // (`packages/data-schemas/src/methods/conversationTag.ts`); a
+            // fix-round-1 `tag: {$nin: ownTags}` narrowing "fixed" an
+            // unobserved over-count by instructing Mongo NOT TO DELETE a
+            // §1-style duplicate — an under-delete on the account-deletion
+            // path (`UserController.js:459`), which discards this return
+            // value and would never have seen the over-count it fixed. The
+            // un-narrowed sweep MAY over-count a duplicate name by 1 in the
+            // returned total; nothing is left undeleted.
+            const mongoCount = await this.deferToMongo(ctx, [filter]);
             return sovereign.deletedCount + (isNumber(mongoCount) ? mongoCount : 0);
           },
         },
