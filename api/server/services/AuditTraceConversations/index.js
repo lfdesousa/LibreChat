@@ -111,6 +111,21 @@
  * arguments (plain JS), so this is purely additive. The base has NO
  * `AsyncLocalStorage` and NO backend branch of its own — this module's
  * `wrapModelMethods` remains the ONE decision point.
+ *
+ * **Conversation-Tags-domain extension ON THE ADAPTER BASE (2026-09-17,
+ * FIFTH reuse of this chokepoint — the FIRST domain built on
+ * `../AuditTraceSovereignAdapter` from its very first commit, per
+ * `2026-09-17-SPEC-ADDENDUM-conv-tags-shim-folds-behind-the-adapter-
+ * base.md`).** `../AuditTraceConversationTags::SOVEREIGN_METHOD_BINDERS`
+ * (`getConversationTags`, `createConversationTag`,
+ * `updateConversationTag`, `deleteConversationTag`,
+ * `deleteConversationTags`, `bulkIncrementTagCounts`) is ALSO merged into
+ * `ALL_SOVEREIGN_METHOD_BINDERS` below — see that module's docstring for
+ * its own ground-the-surface enumeration (7 model methods; 6 wired, some
+ * with a narrower Mongo-native carve-out for one call shape) and why
+ * `updateTagsForConversation` deliberately stays unwired (a genuinely
+ * cross-domain, multi-store write no single domain adapter can compose
+ * from the base's primitives alone).
  */
 
 const { callConsoleConversationsProxy } = require('./client');
@@ -148,6 +163,14 @@ const {
 // FOURTH reuse of this chokepoint) — same discipline as the merges above;
 // the binders themselves are built by `AuditTraceSovereignAdapter`.
 const { SOVEREIGN_METHOD_BINDERS: FILE_SOVEREIGN_METHOD_BINDERS } = require('../AuditTraceFiles');
+// MongoDB-elimination Conversation-Tags domain ON THE ADAPTER BASE
+// (2026-09-17, the FIFTH reuse of this chokepoint) — same discipline as
+// the merges above; see `../AuditTraceConversationTags`'s module
+// docstring for which of its 7 model methods are wired vs
+// disclosed-unwired.
+const {
+  SOVEREIGN_METHOD_BINDERS: CONVERSATION_TAG_SOVEREIGN_METHOD_BINDERS,
+} = require('../AuditTraceConversationTags');
 
 const COLLECT_ALL_PAGE_SIZE = 100;
 const DEFAULT_MESSAGES_BY_CURSOR_LIMIT = 25;
@@ -810,12 +833,14 @@ const SOVEREIGN_METHOD_BINDERS = {
  * `AuditTracePrompts::SOVEREIGN_METHOD_BINDERS` (WU-prompts, the SAME
  * day: the SECOND reuse) AND
  * `AuditTraceChatProjects::SOVEREIGN_METHOD_BINDERS` (WU-chatprojects,
- * 2026-09-12: the THIRD reuse). Adding a FUTURE domain's binders (agents,
- * files, ...) means adding one more spread here — `wrapModelMethods`
- * itself, `api/models/index.js`'s single call site, and the
- * `AsyncLocalStorage` in `./requestContext` all stay unchanged, which is
- * the whole point of the pivot: completeness is structural per EXPORT
- * POINT, not per domain.
+ * 2026-09-12: the THIRD reuse) AND `AuditTraceFiles::SOVEREIGN_METHOD_BINDERS`
+ * (2026-09-13: the FOURTH reuse) AND
+ * `AuditTraceConversationTags::SOVEREIGN_METHOD_BINDERS` (2026-09-17: the
+ * FIFTH reuse). Adding a FUTURE domain's binders means adding one more
+ * spread here — `wrapModelMethods` itself, `api/models/index.js`'s single
+ * call site, and the `AsyncLocalStorage` in `./requestContext` all stay
+ * unchanged, which is the whole point of the pivot: completeness is
+ * structural per EXPORT POINT, not per domain.
  */
 const ALL_SOVEREIGN_METHOD_BINDERS = {
   ...SOVEREIGN_METHOD_BINDERS,
@@ -823,6 +848,7 @@ const ALL_SOVEREIGN_METHOD_BINDERS = {
   ...PROMPT_SOVEREIGN_METHOD_BINDERS,
   ...CHAT_PROJECT_SOVEREIGN_METHOD_BINDERS,
   ...FILE_SOVEREIGN_METHOD_BINDERS,
+  ...CONVERSATION_TAG_SOVEREIGN_METHOD_BINDERS,
 };
 
 /**
@@ -869,11 +895,13 @@ const ALL_SOVEREIGN_METHOD_BINDERS = {
  * (every OTHER `~/models` export — users, roles, agent-event actors,
  * subagent threads, prompt ACL/sharing methods,
  * `assignConversationToProject`, `refreshChatProjectStats`, the 9
- * disclosed-unwired file methods, …) is returned unchanged; this function
- * only ever touches the named conversation/message/preset/prompt/
- * chat-project/file methods (the `AuditTracePresets`/`AuditTracePrompts`/
- * `AuditTraceChatProjects`/`AuditTraceFiles` merges above — see this
- * module's docstring's "Method coverage" section).
+ * disclosed-unwired file methods, `updateTagsForConversation`, …) is
+ * returned unchanged; this function only ever touches the named
+ * conversation/message/preset/prompt/chat-project/file/conversation-tag
+ * methods (the `AuditTracePresets`/`AuditTracePrompts`/
+ * `AuditTraceChatProjects`/`AuditTraceFiles`/`AuditTraceConversationTags`
+ * merges above — see this module's docstring's "Method coverage"
+ * section).
  *
  * **Each binder receives `(token, mongoFn, mongoMethods)`, not just
  * `(token)`** — the additive generalization the adapter base needs
