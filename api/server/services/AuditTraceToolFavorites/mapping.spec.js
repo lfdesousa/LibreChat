@@ -22,7 +22,15 @@ describe('toLeanFavorite', () => {
 
 describe('deriveCompositeKey', () => {
   it('joins itemType and itemId with the declared separator', () => {
-    expect(deriveCompositeKey('tool', 'dalle')).toBe(`tool${FAVORITE_KEY_SEPARATOR}dalle`);
+    // Concrete expected string, not `` `tool${FAVORITE_KEY_SEPARATOR}dalle` ``
+    // compared to itself — that form is a tautology that cannot fail no
+    // matter what FAVORITE_KEY_SEPARATOR's value is (mirrors the lesson
+    // from AuditTraceConversationTags/client.spec.js's own encodeTagPath
+    // test, and this exact gap was caught by a manual neuter of
+    // FAVORITE_KEY_SEPARATOR to '' during this WU's build-record proof
+    // round — the tautological form stayed green under that neuter).
+    expect(deriveCompositeKey('tool', 'dalle')).toBe('tool:dalle');
+    expect(FAVORITE_KEY_SEPARATOR).toBe(':');
   });
 
   it('is collision-free across the closed itemType vocabulary even when itemId contains the separator', () => {
