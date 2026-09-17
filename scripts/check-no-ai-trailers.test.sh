@@ -21,7 +21,10 @@
 #        pins the one boundary layer 1 leaves open and proves layer 2 covers it.
 #   FC.  fail-closed — a scan set the guard could not enumerate must be
 #        REFUSED. These reach the error branches through the environment (an
-#        unresolvable oid, a stubbed tool), never by editing the guard.
+#        unresolvable oid, a stubbed tool, a pass-through `git` stub that fails
+#        for one argument shape only), never by editing the guard. FC9 and FC10
+#        each carry a companion control (FC9c, FC10c) fixing the refusal to the
+#        intended branch rather than to a broken stub.
 #
 # To prove any single layer non-vacuous, neuter THAT layer alone (comment out
 # the invocation in its hook, or one alternative in the predicate), re-run, and
@@ -270,6 +273,68 @@ run_guard_with_broken_tool() {
   else
     echo refused
   fi
+}
+
+# The real git binary, resolved once, so a stub can forward to it.
+REAL_GIT="$(command -v git)"
+GUARD_STDERR="$WORKDIR/guard-stderr"
+
+# Build a PASS-THROUGH `git` stub in $1 that forwards every invocation to the
+# real binary EXCEPT one whose argument list contains $2, which fails.
+# run_guard_with_broken_tool breaks a tool outright; that is too blunt for
+# `git`, which this guard calls several times before it reaches the branches
+# under test. The failure is still injected through PATH, never by editing the
+# guard.
+make_partial_git() {
+  local bindir="$1" failarg="$2"
+  rm -rf "$bindir"
+  mkdir -p "$bindir"
+  {
+    printf '#!/bin/sh\n'
+    printf 'for a in "$@"; do\n'
+    printf '  if [ "$a" = %s ]; then\n' "'$failarg'"
+    printf '    echo "stub: refusing %s" >&2\n' "$failarg"
+    printf '    exit 1\n'
+    printf '  fi\n'
+    printf 'done\n'
+    printf 'exec %s "$@"\n' "'$REAL_GIT'"
+  } >"$bindir/git"
+  chmod +x "$bindir/git"
+}
+
+# Run the guard with that stub on PATH. Stderr is kept so a control can assert
+# WHICH fail-closed branch refused: an over-broken stub would make an earlier
+# branch refuse and the control would pass for the wrong reason.
+run_guard_with_partial_git() {
+  local repo="$1" failarg="$2"
+  shift 2
+  assert_sandbox "$repo"
+  local bindir="$repo/partialbin-git"
+  make_partial_git "$bindir" "$failarg"
+  : >"$GUARD_STDERR"
+  if (cd "$repo" && PATH="$bindir:$PATH" ./scripts/check-no-ai-trailers.sh "$@" >/dev/null 2>"$GUARD_STDERR"); then
+    echo accepted
+  else
+    echo refused
+  fi
+}
+
+# Same stub, but driving git's real pre-push protocol through the REAL hook.
+run_pre_push_hook_with_partial_git() {
+  local repo="$1" failarg="$2" line="$3"
+  assert_sandbox "$repo"
+  local bindir="$repo/partialbin-git"
+  make_partial_git "$bindir" "$failarg"
+  : >"$GUARD_STDERR"
+  if printf '%s\n' "$line" | (cd "$repo" && PATH="$bindir:$PATH" ./.githooks/pre-push origin >/dev/null 2>"$GUARD_STDERR"); then
+    echo accepted
+  else
+    echo refused
+  fi
+}
+
+guard_stderr_has() {
+  grep -qF "$1" "$GUARD_STDERR" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -614,6 +679,71 @@ if [ "$(run_guard_with_broken_tool "$FC_REPO" awk --message "$FC_CLEAN_MSG")" = 
   ok 'FC6 a normalizer error refuses (a clean message, unnormalizable)'
 else
   ko 'FC6 a normalizer error refuses' 'the guard exited 0 on a message it never normalized'
+fi
+
+# FC9: `git rev-parse` can succeed and the MESSAGE READ still fail. scan_commit
+# checks that status separately; without the check `body` would be the empty
+# string, the scan would find nothing in it, and the commit would be reported
+# CLEAN. The target here is the trailer-bearing tip, so "accepted" would mean
+# the guard cleared a commit that really does carry `Co-Authored-By: Claude`.
+#
+# Reached through a PASS-THROUGH `git` stub that fails only for `--format=%B`,
+# so every other git call the guard makes still works. The assertion names the
+# branch via its diagnostic as well as the exit status: a stub that broke git
+# outright would make `git rev-parse` fail and FC4's branch would refuse for
+# the wrong reason, leaving this control vacuous.
+if [ "$(run_guard_with_partial_git "$FC_REPO" '--format=%B' --commit "$FC_TIP")" = refused ] \
+  && guard_stderr_has 'unable to read the message of'; then
+  ok 'FC9 --commit refuses when the commit body read itself fails'
+else
+  ko 'FC9 --commit refuses when the commit body read itself fails' \
+    'the guard exited 0, or refused on a different branch; an unread message was treated as empty'
+fi
+
+# FC9c is the control FOR FC9, in the same shape as FC2c: the SAME pass-through
+# stub failing a format the guard deliberately tolerates (`--format=%s`, read
+# with `|| true` because the subject is only used to label the report) must let
+# the guard run all the way to the scan and refuse on the TRAILER. That fixes
+# FC9's refusal to the body-read branch rather than to a broken stub.
+if [ "$(run_guard_with_partial_git "$FC_REPO" '--format=%s' --commit "$FC_TIP")" = refused ] \
+  && guard_stderr_has 'forbidden AI-attribution trailer'; then
+  ok 'FC9c the same stub failing --format=%s still reaches the scan (refuses on the trailer)'
+else
+  ko 'FC9c the same stub failing --format=%s still reaches the scan' \
+    'the pass-through stub does not pass through; FC9 cannot be attributed to the body-read branch'
+fi
+
+# FC10: `git hash-object --stdin` is how scan_pre_push learns git's null object
+# id, which is the ONLY way it can tell a branch deletion or a first push from
+# an ordinary update. If that fails the hook cannot classify the ref operation
+# and must refuse. Stated precisely, because the difference is narrower than
+# the other fail-closed branches: removing the check does not fail open on a
+# trailer (the null oid then matches nothing and `git rev-list` refuses the
+# deletion / first-push shapes), it fails open on an ordinary CLEAN range,
+# which is exactly what this control observes.
+new_repo nulloid
+FC10_REPO="$REPO"
+commit_bypassing_hook "$FC10_REPO" 'feat: an ordinary clean commit'
+FC10_TIP="$(git -C "$FC10_REPO" rev-parse HEAD)"
+FC10_BASE="$(git -C "$FC10_REPO" rev-parse HEAD~1)"
+FC10_LINE="refs/heads/main $FC10_TIP refs/heads/main $FC10_BASE"
+
+if [ "$(run_pre_push_hook_with_partial_git "$FC10_REPO" 'hash-object' "$FC10_LINE")" = refused ] \
+  && guard_stderr_has "unable to determine git's null object id"; then
+  ok 'FC10 --pre-push refuses when the null object id cannot be determined'
+else
+  ko 'FC10 --pre-push refuses when the null object id cannot be determined' \
+    'the hook exited 0, or refused on a different branch; an unclassifiable push was allowed'
+fi
+
+# FC10c is the control FOR FC10: the SAME hook, the SAME ref line, no stub.
+# It must be ACCEPTED, because the range is clean. Without this, FC10 would
+# stay green even if the hook refused every push for some unrelated reason.
+if [ "$(run_pre_push_hook "$FC10_REPO" "$FC10_LINE")" = accepted ]; then
+  ok 'FC10c the same clean range with git intact is accepted'
+else
+  ko 'FC10c the same clean range with git intact is accepted' \
+    'the hook refused a clean range; FC10 cannot be attributed to the null-oid branch'
 fi
 
 # FC7: `core.commentChar` is user-configurable and git accepts a letter. With

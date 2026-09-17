@@ -230,7 +230,9 @@ or `git rebase -i`; `--no-verify` only defers it to CI.
 
 The local hooks are best-effort by construction (`--no-verify`, `HUSKY=0`,
 `core.hooksPath`, `~/.config/husky/init.sh`, and a fresh clone that has not run
-`npm install` yet all bypass them); the CI job is the layer that binds a merge.
+`npm install` yet all bypass them). The CI job is the only layer that can bind
+a merge, and it does so only once an operator marks it a required status check
+in branch protection — until then it reports and does not block.
 The full list of known residual bypasses is kept in the header comment of
 `scripts/check-no-ai-trailers.sh`, and `.github/CODEOWNERS` names an owner for
 the guard, its acceptance matrix and its workflow, so that once branch

@@ -35,11 +35,15 @@
 # Controls FC1 (--range unresolvable), FC2 (--pre-push unknown remote oid),
 # FC3 (--pre-push unknown local oid on a first push), FC4 (--commit
 # unresolvable rev), FC5 (the scanner itself erroring), FC6 (the normalizer
-# erroring).
+# erroring), FC8 (--commit on an object that is not a commit), FC9 (the commit
+# body read itself failing) and FC10 (git's null object id undeterminable).
 #
 # KNOWN RESIDUAL BYPASSES — stated because an undisclosed gap is worse than a
 # disclosed one. Layers 1 and 2 are local hooks and are best-effort BY
-# CONSTRUCTION; layer 3 (CI) is the layer that binds a merge:
+# CONSTRUCTION. Layer 3 (CI) is the only layer that CAN bind a merge, and it
+# does so only once an operator marks the `no-ai-trailers` job a required
+# status check in branch protection; until that toggle is set it reports and
+# does not block:
 #
 #   * `git commit --no-verify` / `git push --no-verify`, and `HUSKY=0`, skip
 #     the local hooks. Layer 3 still scans the PR's commits.
@@ -184,6 +188,13 @@ scan_commit() {
     return 1
   fi
   subject="$(git show -s --format=%s "$sha" 2>/dev/null || true)"
+  # The body read gets its OWN status check, and its own control (FC9). It is
+  # NOT redundant with the resolve above: `git rev-parse` can succeed and the
+  # message read still fail (a git that dies mid-read, an unreadable object).
+  # Without this check `body` would be the empty string, `scan_text` would find
+  # nothing in it, and a commit that really does carry `Co-Authored-By:` would
+  # be reported CLEAN. Proven by the reviewer and now pinned: FC9 fails a
+  # pass-through `git` stub on `--format=%B` alone and asserts this refusal.
   if ! body="$(git show -s --format=%B "$sha")"; then
     echo "ERROR: unable to read the message of $sha; refusing rather than reporting it clean" >&2
     return 1
@@ -217,6 +228,16 @@ scan_pre_push() {
   local zero local_ref local_oid remote_ref remote_oid
   local rev failed=0 revs
 
+  # Control FC10. What this check buys is narrower than the others and is
+  # stated as such: with it removed the guard does NOT fail open on a trailer
+  # — `$zero` becomes the empty string, no ref line matches it, and every line
+  # is then handed to `git rev-list`, which refuses a deletion or a first push
+  # because the null oid is not a resolvable rev. What it does buy is that a
+  # push git could not even be classified for is refused deliberately, with a
+  # diagnostic naming the real fault, instead of being allowed whenever the
+  # range happens to resolve. FC10 asserts exactly that difference (refused vs
+  # accepted on an otherwise clean range) and goes RED when this check alone is
+  # removed.
   if ! zero="$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')" || [ -z "$zero" ]; then
     echo "ERROR: unable to determine git's null object id; refusing the push" >&2
     return 1
