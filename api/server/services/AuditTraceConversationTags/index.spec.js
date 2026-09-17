@@ -347,6 +347,46 @@ describe('AuditTraceConversationTags — the conversation-tags domain ON the sov
         bind('deleteConversationTags', mongoFn)({ user: 'lc-user-1' }),
       );
       expect(result).toBe(2 + 3);
+      // The Mongo sweep excludes (by name) every tag the sovereign sweep
+      // already deleted (2026-09-17 review "ALSO FIX": the pre-fix version
+      // of this call forwarded the ORIGINAL {user} filter unchanged and
+      // would double-count a tag present in both stores under the SAME
+      // name — see DISCLOSED CONSEQUENCE §4 in index.js).
+      expect(mongoFn).toHaveBeenCalledWith({ user: 'lc-user-1', tag: { $nin: ['a', 'b'] } });
+    });
+
+    it('excludes same-named sovereign-deleted tags from the Mongo sweep so a duplicate is not double-counted', async () => {
+      // A tag named "dup" exists in BOTH stores (DISCLOSED CONSEQUENCE §1's
+      // bookmark-flow duplicate shape). Without the exclusion, summing the
+      // sovereign deletedCount (1) and the Mongo deletedCount (1, since
+      // Mongo's OWN deleteMany would also match "dup") would report "2
+      // tags deleted" for what the caller experiences as ONE tag name.
+      callConsoleConversationTagsProxy.mockImplementation(async ({ method, path }) => {
+        if (method === 'GET' && path === '') {
+          return { items: [row('dup')], next_cursor: null };
+        }
+        if (method === 'GET') {
+          return row(path);
+        }
+        if (method === 'DELETE') {
+          return undefined;
+        }
+        throw new Error(`unexpected call: ${method} ${path}`);
+      });
+      const mongoFn = jest.fn().mockResolvedValue(1);
+      const result = await withToken(() =>
+        bind('deleteConversationTags', mongoFn)({ user: 'lc-user-1' }),
+      );
+      expect(mongoFn).toHaveBeenCalledWith({ user: 'lc-user-1', tag: { $nin: ['dup'] } });
+      // Sovereign deletedCount (1) + whatever Mongo's OWN filtered sweep
+      // reports for the NARROWED filter (asserted above to exclude "dup").
+      expect(result).toBe(1 + 1);
+    });
+
+    it('when the caller has NO sovereign tags, the Mongo filter is forwarded unchanged (no empty-array narrowing noise)', async () => {
+      callConsoleConversationTagsProxy.mockResolvedValue({ items: [], next_cursor: null });
+      const mongoFn = jest.fn().mockResolvedValue(0);
+      await withToken(() => bind('deleteConversationTags', mongoFn)({ user: 'lc-user-1' }));
       expect(mongoFn).toHaveBeenCalledWith({ user: 'lc-user-1' });
     });
 

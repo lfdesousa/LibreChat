@@ -17,11 +17,14 @@
  * `{tag:path}` for exactly this reason — see
  * `src/audittrace/routes/console_conversation_tags.py`'s docstring).
  * `encodeTagPath` therefore encodes EACH `/`-delimited segment with
- * `encodeURIComponent` and rejoins with literal `/`: a tag containing no
- * slash round-trips as one safely-escaped segment; a tag containing a
- * slash round-trips as multiple segments, which is exactly what the
- * orchestrator's `:path` param is built to accept. Never applied to the
- * base list/create path (`""`), which carries no tag in the URL.
+ * `encodeURIComponent` and rejoins with literal `/`, which is exactly
+ * what the orchestrator's `:path` param is built to accept — WITH ONE
+ * EXCEPTION, fixed 2026-09-17 (review reject F1 / ADDENDUM E): a tag
+ * whose segment is no-slash is round-tripped as one segment only when
+ * that segment is not itself `.` or `..` — see `encodeTagPath`'s own
+ * docstring for why those two segments are refused rather than encoded.
+ * Never applied to the base list/create path (`""`), which carries no
+ * tag in the URL.
  *
  * Forwards the CALLER's own access token as-is (`Authorization: Bearer
  * <token>`) — the BFF does the RFC 8693 exchange for the
@@ -45,17 +48,70 @@ const { getConfig } = require('../AuditTraceMemory/config');
 const { MissingAccessTokenError, SovereignMemoryError } = require('../AuditTraceMemory/errors');
 
 /**
+ * A `/`-delimited segment that WHATWG URL parsing treats as a relative
+ * navigation segment when it appears in a path — `.` (a no-op segment)
+ * or `..` (pops the preceding segment). Checked case-insensitively
+ * against the RAW (pre-`encodeURIComponent`) segment text.
+ *
+ * @param {string} segment
+ * @returns {boolean}
+ */
+function isDotSegment(segment) {
+  const lowered = segment.toLowerCase();
+  return lowered === '.' || lowered === '..';
+}
+
+/**
  * Percent-encodes each `/`-delimited segment of a tag so it survives as
  * a URL path suffix while preserving the orchestrator's `{tag:path}`
  * multi-segment shape for a tag that itself contains a literal `/`. The
  * empty string maps to itself (the base list/create path never calls
  * this).
  *
+ * **Refuses a `.`/`..` segment instead of encoding it (review reject F1,
+ * 2026-09-17 / ADDENDUM E R1).** `encodeURIComponent` does not escape
+ * `.` — `RFC 3986` unreserved — so a tag segment of exactly `..` passed
+ * straight through as the literal string `..`. Axios's node adapter
+ * resolves the request URL through WHATWG `new URL(...)` before issuing
+ * it, and the URL Standard's "remove dot segments" step COLLAPSES a `..`
+ * segment against whatever precedes it — including the
+ * `/console/conversation-tags` prefix this client itself appends —
+ * before the request ever leaves the process:
+ *
+ * ```
+ * encodeTagPath('../../console/files/victim-id') // pre-fix: unchanged
+ * new URL('http://bff/console/conversation-tags/../../console/files/victim-id')
+ *   .pathname // -> '/console/files/victim-id'  (escaped the domain's
+ *              //    own path prefix, carrying the caller's bearer token)
+ * ```
+ *
+ * **Encoding the dots ourselves would NOT fix this**, so refusal, not an
+ * alternate escape, is the only correct move: the URL Standard defines a
+ * "double-dot path segment" as `..` OR a case-insensitive match for
+ * `.%2e` / `%2e.` / `%2e%2e` — so writing `.` as `%2E` still normalises
+ * away identically. (Everything else already round-trips safely: a raw
+ * `%2e` the CALLER typed has its `%` re-encoded to `%25` by
+ * `encodeURIComponent`, which is none of those four literal forms.)
+ *
  * @param {string} tag
  * @returns {string}
+ * @throws {SovereignMemoryError} (400) if any `/`-delimited segment is
+ *   exactly `.` or `..` — fail-closed, before any network hop.
  */
 function encodeTagPath(tag) {
-  return tag.split('/').map(encodeURIComponent).join('/');
+  return tag
+    .split('/')
+    .map((segment) => {
+      if (isDotSegment(segment)) {
+        throw new SovereignMemoryError(
+          '[AuditTraceConversationTags] a tag segment of "." or ".." would escape the ' +
+            'conversation-tags path when the request URL is resolved — refused (fail-closed)',
+          400,
+        );
+      }
+      return encodeURIComponent(segment);
+    })
+    .join('/');
 }
 
 /**

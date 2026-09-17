@@ -3,8 +3,12 @@
  * behind `AuditTraceSovereignAdapter` (MongoDB-elimination EPIC,
  * `2026-09-13-SPEC-mongo-repl-wu-conversation-tags-fork-chokepoint-shim.md`
  * AS AMENDED by
- * `2026-09-17-SPEC-ADDENDUM-conv-tags-shim-folds-behind-the-adapter-base.md`,
- * which WINS: this module writes NO read/fallthrough/owner-stamping/
+ * `2026-09-17-SPEC-ADDENDUM-conv-tags-shim-folds-behind-the-adapter-base.md`
+ * AS FURTHER AMENDED by
+ * `2026-09-17-SPEC-ADDENDUM-E-enumerate-WHERE-a-value-lands-not-just-WHO-supplied-it.md`
+ * (the F1 path-traversal fix round — `../client.js::encodeTagPath`,
+ * DISCLOSED CONSEQUENCES §§1/2/7/8/9 below), which WINS: this module
+ * writes NO read/fallthrough/owner-stamping/
  * undefined-key-guard/clobber-merge logic of its own — every one of
  * those lives in `../AuditTraceSovereignAdapter` and is proven there
  * ONCE. `../AuditTraceFiles` is the reference adopter this module
@@ -136,11 +140,19 @@
  *     operation across two BFF calls with no shared transaction) — so
  *     the plain tag-catalog write is deferred alongside it rather than
  *     partially committing the tag sovereignly and the conversation
- *     attach on Mongo. Consequence: a tag created via the bookmark flow
- *     is a Mongo-native `ConversationTag` row even while the flag is on;
- *     it becomes visible to this domain's sovereign reads only once
- *     re-saved through a plain (non-attaching) `createConversationTag`
- *     call, or created directly against `/console/conversation-tags`.
+ *     attach on Mongo. **Restated by OUTCOME (2026-09-17 review reject
+ *     F3 / ADDENDUM E R5):** the write still SUCCEEDS, but against
+ *     MONGO, not the sovereign store — Mongo's own `createConversationTag`
+ *     does its OWN `ConversationTag.findOne({user, tag})` idempotency
+ *     check against MONGO, never the sovereign store, so if a sovereign
+ *     tag of the SAME name already exists this call does not find or
+ *     update it: it independently upserts a NEW, separate Mongo-side row
+ *     of the same name, and the two can diverge (different `count`/
+ *     `position`). `getConversationTags` (wired, sovereign-only) never
+ *     merges in that Mongo-side row — a tag created via the bookmark flow
+ *     is INVISIBLE to every sovereign read until it is re-saved through a
+ *     plain (non-attaching) `createConversationTag` call, or created
+ *     directly against `/console/conversation-tags`.
  *  2. **A tag RENAME (`data.tag` set, different from the id) or a
  *     `position` CHANGE is Mongo-native for the WHOLE
  *     `updateConversationTag` call.** A rename also propagates via
@@ -152,8 +164,20 @@
  *     have no compare-and-swap or bulk-update equivalent for; composing
  *     it as N sequential `updateById` calls would leave a caller's tag
  *     order visibly inconsistent to a concurrent reader mid-sequence,
- *     with no rollback if a later call in the sequence failed. Both
- *     stay on the system that already performs them atomically.
+ *     with no rollback if a later call in the sequence failed.
+ *     **Restated by OUTCOME (2026-09-17 review reject F3 / ADDENDUM E
+ *     R5) — this is NOT "stays on the system that already performs it
+ *     atomically"; for a sovereign-only tag NEITHER operation works at
+ *     all:** the Mongo deferral target, `updateConversationTag`, does its
+ *     own `ConversationTag.findOne({user, tag: oldTag})` lookup against
+ *     MONGO (`packages/data-schemas/src/methods/conversationTag.ts`),
+ *     finds nothing for a sovereign-only tag, and returns `null` —
+ *     `routes/tags.js`'s `PUT /:tag` handler then answers **404 "Tag not
+ *     found"**. So for a sovereign-only tag, rename and reposition are
+ *     silently INOPERATIVE (not a value split-brain — a feature loss the
+ *     caller experiences as a 404), and because `getConversationTags`
+ *     sorts by `position`, that tag's ordering is FROZEN at its creation
+ *     position for its whole lifetime.
  *  3. **A sovereign tag delete does not touch `Conversation.tags`
  *     membership or renumber siblings.** The un-migrated Mongo
  *     `deleteConversationTag` additionally pulled the deleted tag out of
@@ -174,7 +198,11 @@
  *     other shape today (the enumeration above), so this is the SAME
  *     "residual filter, no sovereign query surface for it" boundary
  *     `classifyFilter` already names for reads, restated for this
- *     domain's one write-by-filter method.
+ *     domain's one write-by-filter method. For the ONE wired `{user}`
+ *     shape, the Mongo sweep that follows the sovereign one EXCLUDES
+ *     (by name, `tag: {$nin: ownTags}`) every tag the sovereign sweep
+ *     already deleted, so a §1-style same-named duplicate across both
+ *     stores is not counted twice in the returned `deletedCount`.
  *  5. **`updateTagsForConversation` stays 100% Mongo-native.** See the
  *     enumeration above for why. Consequence: a conversation that is
  *     itself sovereign but whose tags are edited via this route
@@ -189,6 +217,49 @@
  *  6. **The `{user}` own-list is bounded** at `LIST_PAGE_SIZE *
  *     LIST_MAX_PAGES` tags/user (the base's declared ceiling; a warning
  *     is logged when hit) — see the constants below.
+ *  7. **`bulkIncrementTagCounts` has a partial-commit window (2026-09-17
+ *     review reject F4 / ADDENDUM E R4 — the one reject class the base
+ *     CANNOT close, because it lives in how THIS domain composes the
+ *     base's primitives, not in any one primitive).** Each of the
+ *     caller's OWN tags is incremented via an INDEPENDENT `updateById`
+ *     round trip, and all of them run concurrently under one
+ *     `Promise.all`. Mongo's original composes the same operation as a
+ *     SINGLE `tenantSafeBulkWrite` call (one `updateOne` op per unique
+ *     tag, `packages/data-schemas/src/methods/conversationTag.ts`'s
+ *     `bulkIncrementTagCounts`), which commits every op or none —
+ *     `packages/data-schemas/misc/ferretdb/bulkWrite.ferretdb.spec.ts`'s
+ *     FLOW 3 (`bulkIncrementTagCounts (existing-only, deduped)`, ~line
+ *     372) is the differential test documenting that ORIGINAL atomic
+ *     behaviour; this domain's composition does not reproduce it. If any
+ *     one round trip rejects (a non-404 BFF error, or a transport
+ *     failure), `Promise.all` rejects immediately while OTHER in-flight
+ *     increments may already have committed sovereignly. Consequence: a
+ *     caller observing a rejected `bulkIncrementTagCounts` call CANNOT
+ *     assume no tag was incremented — an unknown, non-deterministic
+ *     subset (depending on completion order) may already have been.
+ *  8. **`deleteConversationTags`'s `{user}` sweep has the SAME
+ *     partial-commit shape (2026-09-17 review reject F4 / ADDENDUM E
+ *     R4), across TWO stores.** The sovereign half (`deleteByIds`)
+ *     issues its per-tag `DELETE`s sequentially and is not
+ *     transactional: a failure partway leaves the tags deleted so far
+ *     deleted and the rest untouched. The Mongo half then runs as a
+ *     SEPARATE, later call with no shared transaction across either
+ *     phase. Consequence: a caller observing a rejected
+ *     `deleteConversationTags({user})` call cannot assume "all or
+ *     nothing" — some of the caller's tags, in either store, may already
+ *     be gone.
+ *  9. **A tag whose name is exactly `.` or `..` can be CREATED (the
+ *     create body carries it as JSON, never a URL path segment) but can
+ *     never be fetched, updated or deleted BY THAT NAME afterward** — the
+ *     2026-09-17 F1 fix (`./client.js::encodeTagPath`) refuses a `.`/`..`
+ *     path segment on every GET/DELETE call, fail-closed, because that
+ *     segment would otherwise escape this domain's own BFF path prefix
+ *     when the request URL is resolved. Such a tag still appears in
+ *     `getConversationTags`'s list output; only its by-id operations are
+ *     affected. Not reachable through the LibreChat UI's tag editor today
+ *     (no live call site names a `.`/`..` tag) — named because the base's
+ *     own "no absolutes without proof" discipline requires it, not
+ *     because it is a live gap.
  *
  * **Chokepoint:** this module exports ONLY its adapter + binders. The
  * sovereign-vs-Mongo decision stays in
@@ -388,7 +459,16 @@ class AuditTraceConversationTagsAdapter extends AuditTraceSovereignAdapter {
               token,
               fallback: async () => ({ deletedCount: 0 }),
             });
-            const mongoCount = await this.deferToMongo(ctx, [filter]);
+            // Excludes by NAME every tag the sovereign sweep above already
+            // removed, so a Mongo-native duplicate of the SAME tag name
+            // (DISCLOSED CONSEQUENCE §1 — the addToConversation Mongo
+            // deferral can leave a same-named row in each store) is not
+            // counted a second time by Mongo's own `deleteMany`. `$nin: []`
+            // when `ownTags` is empty matches everything, i.e. a no-op
+            // narrowing — the filter still reduces to the caller's own
+            // {user} scope in that case.
+            const mongoFilter = ownTags.length > 0 ? { ...filter, tag: { $nin: ownTags } } : filter;
+            const mongoCount = await this.deferToMongo(ctx, [mongoFilter]);
             return sovereign.deletedCount + (isNumber(mongoCount) ? mongoCount : 0);
           },
         },
