@@ -128,7 +128,12 @@
  * from the base's primitives alone).
  *
  * **Tool-Favorites-domain extension ON THE ADAPTER BASE (2026-09-17,
- * SIXTH reuse of this chokepoint — the SECOND domain built on
+ * SEVENTH reuse of this chokepoint counting every domain merged into
+ * `ALL_SOVEREIGN_METHOD_BINDERS` below including this module's own
+ * conversation/message entry — verify by counting spreads: this module's
+ * own `SOVEREIGN_METHOD_BINDERS` (1st), Presets (2nd), Prompts (3rd),
+ * ChatProjects (4th), Files (5th), ConversationTags (6th), Tool-Favorites
+ * (7th) — the SECOND domain built on
  * `../AuditTraceSovereignAdapter` from its very first commit), per
  * `2026-09-17-SPEC-mongo-repl-wu-tool-favorites-fork-chokepoint-shim.md`
  * AS AMENDED (pre-dispatch) by `2026-09-17-SPEC-ADDENDUM-G-derive-the-
@@ -189,7 +194,9 @@ const {
   SOVEREIGN_METHOD_BINDERS: CONVERSATION_TAG_SOVEREIGN_METHOD_BINDERS,
 } = require('../AuditTraceConversationTags');
 // MongoDB-elimination Tool-Favorites domain ON THE ADAPTER BASE
-// (2026-09-17, the SIXTH reuse of this chokepoint) — same discipline as
+// (2026-09-17, the SEVENTH reuse of this chokepoint, counting this
+// module's own binder map as the first spread — see the module
+// docstring above for the full count) — same discipline as
 // the merges above; see `../AuditTraceToolFavorites`'s module docstring
 // for why `removeToolFavorite` is the one method that calls `callProxy`
 // directly rather than composing `deleteById`/`deleteByIds`.
@@ -861,7 +868,12 @@ const SOVEREIGN_METHOD_BINDERS = {
  * `AuditTraceConversationTags::SOVEREIGN_METHOD_BINDERS` (2026-09-17: the
  * FIFTH reuse) AND
  * `AuditTraceToolFavorites::TOOL_FAVORITE_SOVEREIGN_METHOD_BINDERS`
- * (2026-09-17, same day: the SIXTH reuse). Adding a FUTURE domain's
+ * (2026-09-17, same day: the SIXTH reuse of this pattern for a domain
+ * OTHER than conversations, matching the FIRST-through-FIFTH count above
+ * — equivalently the SEVENTH spread in the object literal below, counting
+ * this module's own conversation/message binder map as the first spread;
+ * both counts describe the same fact and are reconciled here rather than
+ * left as two silently-differing numbers). Adding a FUTURE domain's
  * binders means adding one more spread here — `wrapModelMethods` itself,
  * `api/models/index.js`'s single call site, and the `AsyncLocalStorage`
  * in `./requestContext` all stay unchanged, which is the whole point of

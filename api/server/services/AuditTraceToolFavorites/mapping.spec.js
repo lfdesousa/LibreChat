@@ -38,6 +38,17 @@ describe('deriveCompositeKey', () => {
     // contain the separator, must derive a DISTINCT key from every other
     // pairing — the "itemId containing the separator is the obvious
     // attack" the spec calls out.
+    //
+    // DISCLOSED (falsifiability): this test is NOT separator-falsifiable —
+    // given today's prefix-free 4-word vocabulary (`builtin`/`tool`/`mcp`/
+    // `skill`, none a colon-terminated prefix of another), every pairing
+    // below stays distinct under ANY separator value, including the empty
+    // string, because the leading itemType alone already discriminates
+    // every row. It genuinely exercises "an itemId embedding another
+    // itemType doesn't cause a collision" — a real property — but it
+    // cannot detect a wrong/neutered `FAVORITE_KEY_SEPARATOR`. Only the
+    // "joins itemType and itemId with the declared separator" test above
+    // pins the separator's actual value.
     const pairs = [
       ['builtin', 'web_search'],
       ['tool', 'dalle'],
@@ -58,9 +69,51 @@ describe('deriveCompositeKey', () => {
     // (itemType='tool', itemId='mcp:evil') must NOT equal
     // (itemType='mcp', itemId='evil') even though naive string
     // concatenation could theoretically collide for other separators.
+    //
+    // DISCLOSED (falsifiability): same as the test above — with today's
+    // prefix-free vocabulary, `spoofAttempt` and `target` differ by their
+    // leading itemType regardless of the separator's value, so this test
+    // also cannot go RED under a `FAVORITE_KEY_SEPARATOR` neuter. It
+    // exercises a genuinely distinct property (no cross-itemType spoof),
+    // just not the separator's identity.
     const spoofAttempt = deriveCompositeKey('tool', 'mcp:evil');
     const target = deriveCompositeKey('mcp', 'evil');
     expect(spoofAttempt).not.toBe(target);
+  });
+});
+
+describe('deriveCompositeKey — bound to the REAL FAVORITE_ITEM_TYPES export', () => {
+  // Every collision-freedom test in this WU (here and in
+  // index.spec.js/wireProbe.spec.js) mocks `FAVORITE_ITEM_TYPES` with a
+  // hardcoded literal — none binds the actual `@librechat/data-schemas`
+  // export. If upstream ever adds a real item type, or one that IS a
+  // colon-terminated prefix of another, nothing else in this suite would
+  // turn red (each mock would just keep matching itself). This block is
+  // deliberately NOT mocked — `mapping.spec.js` never mocks
+  // `@librechat/data-schemas`, so this require resolves the real module.
+  const { FAVORITE_ITEM_TYPES: REAL_FAVORITE_ITEM_TYPES } = require('@librechat/data-schemas');
+
+  it('the real vocabulary matches the literal every mock in this WU assumes', () => {
+    expect(REAL_FAVORITE_ITEM_TYPES).toEqual(['builtin', 'tool', 'mcp', 'skill']);
+  });
+
+  it('no REAL itemType is a separator-terminated prefix of another — the collision-freedom precondition', () => {
+    // This is the actual property the module docstring's collision-freedom
+    // argument depends on. Checked against the LIVE export, not a mock —
+    // if upstream ever violates it (e.g. adds `tool2` alongside `tool`,
+    // making `tool:` a prefix of `tool2:`... no — checked the OTHER way:
+    // a future type equal to `tool:x`-shaped would need the FULL
+    // separator-terminated string to prefix another), this test fails.
+    for (const a of REAL_FAVORITE_ITEM_TYPES) {
+      for (const b of REAL_FAVORITE_ITEM_TYPES) {
+        if (a === b) {
+          continue;
+        }
+        expect(`${b}${FAVORITE_KEY_SEPARATOR}`.startsWith(`${a}${FAVORITE_KEY_SEPARATOR}`)).toBe(
+          false,
+        );
+      }
+    }
   });
 });
 
