@@ -15,7 +15,15 @@
  * re-derived to cover `createConversationTag`'s TWO interpolation sites
  * and `bulkIncrementTagCounts`'s caller-supplied tag list — F7;
  * DISCLOSED CONSEQUENCE §9 rewritten to the true, route-traced
- * behaviour — F8), which WINS: this module writes NO read/fallthrough/owner-stamping/
+ * behaviour — F8)
+ * AS FURTHER AMENDED by
+ * `2026-09-17-SPEC-ADDENDUM-G-derive-the-surface-table-from-the-WIRE-not-from-reading.md`
+ * (fix round 3 — the surface table is now GENERATED from a captured-wire
+ * probe, `./wireProbe.spec.js`, not from reading; that probe's own
+ * captured output found the fix-round-2 table still undercounted
+ * `createConversationTag` at TWO surfaces when the real count is THREE —
+ * `this.listOwn`'s query-string maxPosition scan was missing entirely —
+ * and DISCLOSED CONSEQUENCES §10/§11 below are new), which WINS: this module writes NO read/fallthrough/owner-stamping/
  * undefined-key-guard/clobber-merge logic of its own — every one of
  * those lives in `../AuditTraceSovereignAdapter` and is proven there
  * ONCE. `../AuditTraceFiles` is the reference adopter this module
@@ -319,6 +327,51 @@
  *     carryover, both outside this fork's control; named because the
  *     base's own "no absolutes without proof" discipline requires it, not
  *     because it is exercised by any live call site today.
+ *  10. **NEW 2026-09-17, fix round 3 (ADDENDUM G "Also required").**
+ *      `getConversationTags(user)` DISCARDS its caller-supplied `user` on
+ *      the sovereign path. `classifyFilter({user}, ...)`
+ *      (`../AuditTraceSovereignAdapter/filters.js`) only checks that
+ *      `user` is a non-empty STRING to select the `own-list` shape — its
+ *      own docstring names this explicitly ("this is NOT owner-key
+ *      scoping — RLS scopes by the token regardless"); the rows actually
+ *      served come from `this.listOwn(token)`, scoped by the CALLER'S OWN
+ *      bearer token, never by the string value of `user`. **Disclosed and
+ *      ACCEPTED, not treated as a bug:** the outcome is fail-SAFE, not
+ *      fail-open — a caller naming another user's id receives their OWN
+ *      tags, the same as if they had passed their own id. `routes/tags.js`'s
+ *      `GET /` invokes this with `req.user.id` (the token's own subject),
+ *      never a caller-supplied value, so no live caller can even present a
+ *      different `user` through the public surface today; the discard is
+ *      a defence-in-depth property of the base every migrated domain
+ *      shares, not an exploitable gap this domain introduces.
+ *  11. **NEW 2026-09-17, fix round 3 (ADDENDUM G "Also required" R5) —
+ *      the status code a `importBatchBuilder.js` consumer's user sees for
+ *      a `.`/`..` tag element, traced end to end.** A `.`/`..` element in
+ *      `convo.tags` reaches `bulkIncrementTagCounts(user, tags)`
+ *      (`api/server/utils/import/importBatchBuilder.js:198`) unfiltered —
+ *      `isId` accepts any non-empty string — and this domain's `impl`
+ *      maps it into `this.updateById('.'|'..', ...)` inside the method's
+ *      `Promise.all`; `updateById`'s `fetchRaw` → `callProxy({path: id})`
+ *      → `encodeTagPath` throws the 400 `SovereignMemoryError` BEFORE any
+ *      network hop, rejecting that `Promise.all` immediately (DISCLOSED
+ *      CONSEQUENCE §7's partial-commit window applies — a sibling
+ *      increment may already have committed). That rejection is one of
+ *      the THREE promises in `saveBatch()`'s own `Promise.all`
+ *      (`importBatchBuilder.js:190-199`), whose `catch` logs and
+ *      RE-THROWS the same error; `importConversations()`'s `catch`
+ *      (`api/server/utils/import/importConversations.js:38-40`) logs and
+ *      RE-THROWS again by design ("throw error all the way up so request
+ *      does not return success"); `routes/convos.js`'s `POST /import`
+ *      handler's `catch` checks `isContentFilterError(error)` first — a
+ *      `SovereignMemoryError` is none of `ContentFilterError` /
+ *      `ContentTraversalLimitError` / `UninspectableFileError`
+ *      (`packages/api/src/middleware/contentFilter.ts`), so this is
+ *      `false` — and falls through to the generic branch:
+ *      **`res.status(500).send('Error processing file')`.** The user sees
+ *      a bare **HTTP 500**, plain-text `"Error processing file"` — the
+ *      same undifferentiated shape as DISCLOSED CONSEQUENCE §9's
+ *      account-deletion trace; the underlying 400, and which tag caused
+ *      it, is never surfaced.
  *
  * **Chokepoint:** this module exports ONLY its adapter + binders. The
  * sovereign-vs-Mongo decision stays in
