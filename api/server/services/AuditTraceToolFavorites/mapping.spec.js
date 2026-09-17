@@ -40,15 +40,28 @@ describe('deriveCompositeKey', () => {
     // attack" the spec calls out.
     //
     // DISCLOSED (falsifiability): this test is NOT separator-falsifiable —
-    // given today's prefix-free 4-word vocabulary (`builtin`/`tool`/`mcp`/
-    // `skill`, none a colon-terminated prefix of another), every pairing
-    // below stays distinct under ANY separator value, including the empty
-    // string, because the leading itemType alone already discriminates
-    // every row. It genuinely exercises "an itemId embedding another
-    // itemType doesn't cause a collision" — a real property — but it
-    // cannot detect a wrong/neutered `FAVORITE_KEY_SEPARATOR`. Only the
-    // "joins itemType and itemId with the declared separator" test above
-    // pins the separator's actual value.
+    // every pairing below stays distinct under ANY separator value,
+    // including the empty string — but NOT because "the leading itemType
+    // alone already discriminates every row" (that claim is false against
+    // this very list: `tool` is the itemType in rows 2, 5 and 9, `mcp` in
+    // rows 3, 6 and 10). The real mechanism: every composite key is
+    // `itemType + SEPARATOR + itemId` for a SINGLE separator value shared
+    // by all ten rows, so two keys can be equal only if their total
+    // lengths are equal, which (separator length being constant across
+    // the list) requires their `itemType + itemId` concatenation lengths
+    // to be equal. Those concatenation lengths are 17, 9, 13, 11, 18, 13,
+    // 23, 19, 7, 3 — unique except rows 3 and 6, which tie at 13 AND share
+    // the same itemType (`mcp`) AND differ in the remaining itemId tail
+    // (`everything` vs `tool:dalle`), so their keys diverge character-for-
+    // character immediately after the shared `mcp` + separator prefix,
+    // regardless of what the separator's value is. Every other row differs
+    // in concatenation length from every other row, so no separator value
+    // can equalise their total lengths either. It genuinely exercises "an
+    // itemId embedding another itemType doesn't cause a collision" — a
+    // real property — but it cannot detect a wrong/neutered
+    // `FAVORITE_KEY_SEPARATOR`. Only the "joins itemType and itemId with
+    // the declared separator" test above pins the separator's actual
+    // value.
     const pairs = [
       ['builtin', 'web_search'],
       ['tool', 'dalle'],
@@ -83,14 +96,18 @@ describe('deriveCompositeKey', () => {
 });
 
 describe('deriveCompositeKey — bound to the REAL FAVORITE_ITEM_TYPES export', () => {
-  // Every collision-freedom test in this WU (here and in
-  // index.spec.js/wireProbe.spec.js) mocks `FAVORITE_ITEM_TYPES` with a
-  // hardcoded literal — none binds the actual `@librechat/data-schemas`
-  // export. If upstream ever adds a real item type, or one that IS a
-  // colon-terminated prefix of another, nothing else in this suite would
-  // turn red (each mock would just keep matching itself). This block is
-  // deliberately NOT mocked — `mapping.spec.js` never mocks
-  // `@librechat/data-schemas`, so this require resolves the real module.
+  // Every OTHER spec file in this domain that touches
+  // `@librechat/data-schemas` mocks it: `index.spec.js` and
+  // `wireProbe.spec.js` mock `FAVORITE_ITEM_TYPES` with the same
+  // hardcoded 4-element literal; `client.spec.js` also mocks the module
+  // (for `logger` only — `client.js` never imports `FAVORITE_ITEM_TYPES`,
+  // so that key is simply absent from its mock). None of the three binds
+  // the actual export. If upstream ever adds a real item type, or one
+  // that IS a colon-terminated prefix of another, nothing else in this
+  // suite would turn red (each mock would just keep matching itself).
+  // This block is deliberately NOT mocked — `mapping.spec.js` as a whole
+  // has no `jest.mock` of any kind, so this require resolves the real
+  // module.
   const { FAVORITE_ITEM_TYPES: REAL_FAVORITE_ITEM_TYPES } = require('@librechat/data-schemas');
 
   it('the real vocabulary matches the literal every mock in this WU assumes', () => {
@@ -99,11 +116,20 @@ describe('deriveCompositeKey — bound to the REAL FAVORITE_ITEM_TYPES export', 
 
   it('no REAL itemType is a separator-terminated prefix of another — the collision-freedom precondition', () => {
     // This is the actual property the module docstring's collision-freedom
-    // argument depends on. Checked against the LIVE export, not a mock —
-    // if upstream ever violates it (e.g. adds `tool2` alongside `tool`,
-    // making `tool:` a prefix of `tool2:`... no — checked the OTHER way:
-    // a future type equal to `tool:x`-shaped would need the FULL
-    // separator-terminated string to prefix another), this test fails.
+    // argument depends on: no itemType, with the separator appended, may
+    // be a prefix of any OTHER itemType with the separator appended
+    // (checked in both directions by the nested loop below, since
+    // `startsWith` is not symmetric). Checked against the LIVE export,
+    // not a mock. Example of what WOULD violate it: a future type
+    // `tool2` alongside `tool` does NOT violate it (`tool2:` and `tool:`
+    // diverge at their 5th character, `2` vs `:`, so neither is a prefix
+    // of the other) — but a future type `tool:pro` WOULD violate it:
+    // `tool:` (5 chars) IS a prefix of `tool:pro:` (9 chars, itself
+    // starting `t,o,o,l,:`), so `deriveCompositeKey('tool', 'pro:evil')`
+    // and `deriveCompositeKey('tool:pro', 'evil')` both derive the
+    // identical composite key `tool:pro:evil` (verified:
+    // `'tool' + ':' + 'pro:evil' === 'tool:pro' + ':' + 'evil'`). This
+    // test fails the moment such a type is added.
     for (const a of REAL_FAVORITE_ITEM_TYPES) {
       for (const b of REAL_FAVORITE_ITEM_TYPES) {
         if (a === b) {
