@@ -1,0 +1,5 @@
+#!/bin/sh
+# Layer 2 of the no-AI-trailer guard: scans every commit in the push range.
+# This is the layer that catches a trailer-bearing commit that was amended
+# locally but still lives on a stale branch — the shape of the real incident.
+"$(dirname "$0")/../scripts/check-no-ai-trailers.sh" --pre-push "$1"

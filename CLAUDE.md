@@ -218,6 +218,29 @@ Without it, OpenID JWT request burst caching can serve a stale `req.user` until 
 
 ---
 
+## Commit messages
+
+**No AI-attribution trailers.** A commit message must not contain a
+`Co-Authored-By:` line — whoever is named, with no allow-list — nor a
+`Claude-Session:` line. The rule is enforced mechanically rather than by
+convention: `scripts/check-no-ai-trailers.sh` runs from `.husky/commit-msg`,
+from `.husky/pre-push`, and from the `No AI Trailers` CI workflow over the
+pull request's own commits. Fix an offending commit with `git commit --amend`
+or `git rebase -i`; `--no-verify` only defers it to CI.
+
+The local hooks are best-effort by construction (`--no-verify`, `HUSKY=0`,
+`core.hooksPath`, `~/.config/husky/init.sh`, and a fresh clone that has not run
+`npm install` yet all bypass them). The CI job is the only layer that can bind
+a merge, and it does so only once an operator marks it a required status check
+in branch protection — until then it reports and does not block.
+The full list of known residual bypasses is kept in the header comment of
+`scripts/check-no-ai-trailers.sh`, and `.github/CODEOWNERS` names an owner for
+the guard, its acceptance matrix and its workflow, so that once branch
+protection requires code-owner review a single pull request no longer weakens
+all three at once and passes its own weakened test.
+
+---
+
 ## Formatting
 
 Fix all formatting lint errors (trailing spaces, tabs, newlines, indentation) using auto-fix when available. All TypeScript/ESLint warnings and errors **must** be resolved.

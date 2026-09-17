@@ -1,0 +1,5 @@
+#!/bin/sh
+# Layer 1 of the no-AI-trailer guard: the earliest point, before the work
+# leaves the laptop. Deliberately has no `[ -n "$CI" ] && exit 0` escape —
+# an env-var opt-out in a guard on the assistant's own behaviour is a hole.
+"$(dirname "$0")/../scripts/check-no-ai-trailers.sh" --message "$1"

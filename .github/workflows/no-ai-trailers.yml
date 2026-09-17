@@ -1,0 +1,63 @@
+name: No AI Trailers
+
+# Layer 3 of the no-AI-trailer guard. Layers 1 and 2 are local hooks, which
+# `--no-verify`, `HUSKY=0`, `core.hooksPath` and `~/.config/husky/init.sh` all
+# switch off, and which a fresh clone does not have at all until `npm install`
+# generates `.husky/_`. This job runs server-side instead, so it is the layer
+# that binds a merge — once an operator marks it a required status check in
+# branch protection. Until that toggle is set it reports, and does not block;
+# the guard's own header comment says the same rather than assuming it.
+#
+# There is deliberately NO `paths:` filter — a path filter would let a PR that
+# touches none of the listed paths skip the check entirely, which is the hole
+# this guard exists to close.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  no-ai-trailers:
+    name: No AI trailers in the PR's commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          # Full history is load-bearing: the check resolves the merge-base of
+          # the PR's base and head, which a shallow checkout does not contain.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Scan the PR's own commits (merge-base..HEAD)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Scoped to the PR's commits, never full history: an upstream merge
+          # can import legitimate contributor trailers at any time, and a
+          # full-history check would then fail forever on every PR.
+          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          echo "Scanning ${MERGE_BASE}..${HEAD_SHA}"
+          ./scripts/check-no-ai-trailers.sh --range "${MERGE_BASE}..${HEAD_SHA}"
+
+  guard-self-test:
+    name: Trailer-guard acceptance matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Run the guard's own acceptance matrix
+        run: ./scripts/check-no-ai-trailers.test.sh
