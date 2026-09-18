@@ -126,6 +126,28 @@
  * `updateTagsForConversation` deliberately stays unwired (a genuinely
  * cross-domain, multi-store write no single domain adapter can compose
  * from the base's primitives alone).
+ *
+ * **Tool-Favorites-domain extension ON THE ADAPTER BASE (2026-09-17,
+ * SEVENTH reuse of this chokepoint counting every domain merged into
+ * `ALL_SOVEREIGN_METHOD_BINDERS` below including this module's own
+ * conversation/message entry — verify by counting spreads: this module's
+ * own `SOVEREIGN_METHOD_BINDERS` (1st), Presets (2nd), Prompts (3rd),
+ * ChatProjects (4th), Files (5th), ConversationTags (6th), Tool-Favorites
+ * (7th) — the SECOND domain built on
+ * `../AuditTraceSovereignAdapter` from its very first commit), per
+ * `2026-09-17-SPEC-mongo-repl-wu-tool-favorites-fork-chokepoint-shim.md`
+ * AS AMENDED (pre-dispatch) by `2026-09-17-SPEC-ADDENDUM-G-derive-the-
+ * surface-table-from-the-WIRE-not-from-reading.md`.**
+ * `../AuditTraceToolFavorites::TOOL_FAVORITE_SOVEREIGN_METHOD_BINDERS`
+ * (`getToolFavorites`, `addToolFavorite`, `removeToolFavorite`) is ALSO
+ * merged into `ALL_SOVEREIGN_METHOD_BINDERS` below — see that module's
+ * docstring for its own ground-the-surface enumeration (all 3 model
+ * methods wired, whole), the composite-`(itemType, itemId)`-key mapping,
+ * the re-shaped `MAX_FAVORITES_EXCEEDED` cap error, and why
+ * `removeToolFavorite` is the one method in this whole EPIC that does not
+ * compose `deleteById`/`deleteByIds` (this domain's orchestrator API has
+ * no GET-by-key or batch-get route, verified by a committed
+ * `TestClient` reproduction rather than assumed).
  */
 
 const { callConsoleConversationsProxy } = require('./client');
@@ -171,6 +193,14 @@ const { SOVEREIGN_METHOD_BINDERS: FILE_SOVEREIGN_METHOD_BINDERS } = require('../
 const {
   SOVEREIGN_METHOD_BINDERS: CONVERSATION_TAG_SOVEREIGN_METHOD_BINDERS,
 } = require('../AuditTraceConversationTags');
+// MongoDB-elimination Tool-Favorites domain ON THE ADAPTER BASE
+// (2026-09-17, the SEVENTH reuse of this chokepoint, counting this
+// module's own binder map as the first spread — see the module
+// docstring above for the full count) — same discipline as
+// the merges above; see `../AuditTraceToolFavorites`'s module docstring
+// for why `removeToolFavorite` is the one method that calls `callProxy`
+// directly rather than composing `deleteById`/`deleteByIds`.
+const { TOOL_FAVORITE_SOVEREIGN_METHOD_BINDERS } = require('../AuditTraceToolFavorites');
 
 const COLLECT_ALL_PAGE_SIZE = 100;
 const DEFAULT_MESSAGES_BY_CURSOR_LIMIT = 25;
@@ -836,11 +866,18 @@ const SOVEREIGN_METHOD_BINDERS = {
  * 2026-09-12: the THIRD reuse) AND `AuditTraceFiles::SOVEREIGN_METHOD_BINDERS`
  * (2026-09-13: the FOURTH reuse) AND
  * `AuditTraceConversationTags::SOVEREIGN_METHOD_BINDERS` (2026-09-17: the
- * FIFTH reuse). Adding a FUTURE domain's binders means adding one more
- * spread here — `wrapModelMethods` itself, `api/models/index.js`'s single
- * call site, and the `AsyncLocalStorage` in `./requestContext` all stay
- * unchanged, which is the whole point of the pivot: completeness is
- * structural per EXPORT POINT, not per domain.
+ * FIFTH reuse) AND
+ * `AuditTraceToolFavorites::TOOL_FAVORITE_SOVEREIGN_METHOD_BINDERS`
+ * (2026-09-17, same day: the SIXTH reuse of this pattern for a domain
+ * OTHER than conversations, matching the FIRST-through-FIFTH count above
+ * — equivalently the SEVENTH spread in the object literal below, counting
+ * this module's own conversation/message binder map as the first spread;
+ * both counts describe the same fact and are reconciled here rather than
+ * left as two silently-differing numbers). Adding a FUTURE domain's
+ * binders means adding one more spread here — `wrapModelMethods` itself,
+ * `api/models/index.js`'s single call site, and the `AsyncLocalStorage`
+ * in `./requestContext` all stay unchanged, which is the whole point of
+ * the pivot: completeness is structural per EXPORT POINT, not per domain.
  */
 const ALL_SOVEREIGN_METHOD_BINDERS = {
   ...SOVEREIGN_METHOD_BINDERS,
@@ -849,6 +886,7 @@ const ALL_SOVEREIGN_METHOD_BINDERS = {
   ...CHAT_PROJECT_SOVEREIGN_METHOD_BINDERS,
   ...FILE_SOVEREIGN_METHOD_BINDERS,
   ...CONVERSATION_TAG_SOVEREIGN_METHOD_BINDERS,
+  ...TOOL_FAVORITE_SOVEREIGN_METHOD_BINDERS,
 };
 
 /**
@@ -897,11 +935,11 @@ const ALL_SOVEREIGN_METHOD_BINDERS = {
  * `assignConversationToProject`, `refreshChatProjectStats`, the 9
  * disclosed-unwired file methods, `updateTagsForConversation`, …) is
  * returned unchanged; this function only ever touches the named
- * conversation/message/preset/prompt/chat-project/file/conversation-tag
- * methods (the `AuditTracePresets`/`AuditTracePrompts`/
- * `AuditTraceChatProjects`/`AuditTraceFiles`/`AuditTraceConversationTags`
- * merges above — see this module's docstring's "Method coverage"
- * section).
+ * conversation/message/preset/prompt/chat-project/file/conversation-tag/
+ * tool-favorites methods (the `AuditTracePresets`/`AuditTracePrompts`/
+ * `AuditTraceChatProjects`/`AuditTraceFiles`/`AuditTraceConversationTags`/
+ * `AuditTraceToolFavorites` merges above — see this module's docstring's
+ * "Method coverage" section).
  *
  * **Each binder receives `(token, mongoFn, mongoMethods)`, not just
  * `(token)`** — the additive generalization the adapter base needs

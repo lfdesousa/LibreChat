@@ -49,11 +49,23 @@ const seedDatabase = async () => {
  * `updateFilesUsage`/`deleteFile`/`deleteFiles` —
  * `server/services/AuditTraceFiles/index.js`; 9 of the 17 `~/models`
  * file methods deliberately stay unwired, see that module's docstring),
- * all merged into the SAME `wrapModelMethods()` call below — still
- * exactly one call site, one `AsyncLocalStorage`. Every other `~/models`
- * export (users, roles, agent-event actors, subagent threads, …) passes
- * through `wrapModelMethods` unchanged — this only touches the named
- * conversation/message/preset/prompt/chat-project/file methods.
+ * then by the Conversation-Tags domain (2026-09-17, the fifth reuse) to
+ * also cover `getConversationTags`/`createConversationTag`/
+ * `updateConversationTag`/`deleteConversationTag`/`deleteConversationTags`/
+ * `bulkIncrementTagCounts` (`server/services/AuditTraceConversationTags/
+ * index.js`; `updateTagsForConversation` deliberately stays unwired, see
+ * that module's docstring), then by the Tool-Favorites domain (2026-09-17,
+ * same day, the sixth reuse) to also cover `getToolFavorites`/
+ * `addToolFavorite`/`removeToolFavorite` (`server/services/
+ * AuditTraceToolFavorites/index.js`; all three wired, none unwired — see
+ * that module's docstring for why `removeToolFavorite` alone bypasses
+ * `deleteById`/`deleteByIds`), all merged into the SAME
+ * `wrapModelMethods()` call below — still exactly one call site, one
+ * `AsyncLocalStorage`. Every other `~/models` export (users, roles,
+ * agent-event actors, subagent threads, …) passes through
+ * `wrapModelMethods` unchanged — this only touches the named
+ * conversation/message/preset/prompt/chat-project/file/conversation-tag/
+ * tool-favorites methods.
  */
 const wrappedMethods = wrapModelMethods(methods);
 
