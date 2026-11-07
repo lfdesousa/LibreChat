@@ -1,0 +1,2 @@
+{"conversationId": null, "conversationId_present": false, "method": "POST", "mode": "api-inbound", "multipart_field_names": ["endpoint", "endpointType", "file", "file_id", "message_file"], "path": "/api/files"}
+{"conversationId": "5ae3ed08-fca9-5add-b7bc-4b88821e5527", "conversationId_present": true, "method": "POST", "mode": "api-inbound", "multipart_field_names": ["endpoint", "endpointType", "file", "file_id", "conversationId", "message_file", "agent_id"], "path": "/api/files"}
