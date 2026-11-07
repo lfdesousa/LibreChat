@@ -41,6 +41,11 @@ const { MissingAccessTokenError, SovereignMemoryError } = require('./errors');
  *   the multipart part, so the orchestrator's `/memory/upload` sees the
  *   real name rather than a temp-path basename.
  * @param {string} [params.contentType] - the file's MIME type, if known.
+ * @param {string|null|undefined} [params.sessionId] - the chat's conversation
+ *   id (LC-10a). Sent as the `X-Session-Id` request header so the BFF can bind
+ *   the upload to its chat. Whitespace-stripped; empty / blank / non-string
+ *   means NO header at all (never an empty `X-Session-Id:`), mirroring the
+ *   memory-server rule (`bff/proxy.py` strip, empty -> no header).
  * @returns {Promise<Record<string, unknown>>} the BFF response body,
  *   UNCHANGED (the session-memory key/id WU-5 recall will reference).
  * @throws {MissingAccessTokenError} if `token` is falsy — the BFF is
@@ -50,7 +55,7 @@ const { MissingAccessTokenError, SovereignMemoryError } = require('./errors');
  *   response (status mirrors the upstream response byte-for-byte) or a
  *   transport failure (mapped to 502).
  */
-async function callConsoleFilesProxy({ token, filePath, filename, contentType }) {
+async function callConsoleFilesProxy({ token, filePath, filename, contentType, sessionId }) {
   if (!token) {
     throw new MissingAccessTokenError();
   }
@@ -64,13 +69,19 @@ async function callConsoleFilesProxy({ token, filePath, filename, contentType })
     contentType,
   });
 
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    ...formData.getHeaders(),
+  };
+  const trimmedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (trimmedSessionId) {
+    headers['X-Session-Id'] = trimmedSessionId;
+  }
+
   let response;
   try {
     response = await axios.post(url, formData, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...formData.getHeaders(),
-      },
+      headers,
       timeout: timeoutMs,
       // Status is inspected explicitly below (fail-closed relay) rather
       // than letting axios throw and lose the distinction between "the

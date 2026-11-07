@@ -104,4 +104,43 @@ describe('AuditTraceMemory/consoleFilesClient — the BFF POST /console/files HT
       callConsoleFilesProxy({ token: 't', filePath: '/tmp/x.txt', filename: 'x.txt' }),
     ).rejects.toBeInstanceOf(SovereignMemoryError);
   });
+
+  // ── LC-10a — the chat's conversation id rides as `X-Session-Id` ─────────
+  describe('X-Session-Id (LC-10a): strip; empty means no header', () => {
+    const call = async (sessionId) => {
+      axios.post.mockResolvedValue({ status: 200, data: {} });
+      await callConsoleFilesProxy({
+        token: 't',
+        filePath: '/tmp/x.txt',
+        filename: 'x.txt',
+        ...(sessionId === undefined ? {} : { sessionId }),
+      });
+      return axios.post.mock.calls[0][2].headers;
+    };
+
+    it('sends the conversation id as X-Session-Id, alongside (never instead of) Authorization', async () => {
+      const headers = await call('0b1c2d3e-conv');
+      expect(headers['X-Session-Id']).toBe('0b1c2d3e-conv');
+      expect(headers.Authorization).toBe('Bearer t');
+    });
+
+    it('strips surrounding whitespace: " s1 " goes out as exactly "s1"', async () => {
+      const headers = await call(' s1 ');
+      expect(headers['X-Session-Id']).toBe('s1');
+    });
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', '  '],
+      ['a tab/newline-only string', '\t\n'],
+      ['null', null],
+      ['undefined (field absent: the first upload of a new chat)', undefined],
+      ['a number', 123],
+      ['an array (a repeated multipart field)', ['a', 'b']],
+      ['an object', { id: 'a' }],
+    ])('sends NO X-Session-Id header (not even an empty one) for %s', async (_label, value) => {
+      const headers = await call(value);
+      expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain('x-session-id');
+    });
+  });
 });

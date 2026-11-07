@@ -79,7 +79,8 @@ const deleteVectors = async (req, file) => {
  * to the Mongo/RAG path below.
  *
  * @param {object} params
- * @param {ServerRequest} params.req
+ * @param {ServerRequest} params.req - `req.body.conversationId` (multipart field
+ *   from the composer, LC-10a) is forwarded as the BFF's `X-Session-Id`.
  * @param {Express.Multer.File} params.file
  * @returns {Promise<{ bytes: number, filename: string, filepath: string, embedded: boolean }>}
  */
@@ -90,6 +91,9 @@ async function uploadVectorsSovereign({ req, file }) {
     filePath: file.path,
     filename: file.originalname,
     contentType: file.mimetype,
+    // LC-10a: the composer's conversation id (absent on the first upload of a
+    // new chat) rides as `X-Session-Id`; the client strips / drops blanks.
+    sessionId: req?.body?.conversationId,
   });
   logger.debug('Response from sovereign console-files upload', response);
 

@@ -91,6 +91,34 @@ describe('VectorDB/crud — uploadVectors sovereign-backend routing (M3 WU-3)', 
     });
   });
 
+  // ── (a2) LC-10a — the composer's conversation id is forwarded as the
+  //         session id; absent on the first upload of a new chat ────────
+  it('forwards req.body.conversationId to callConsoleFilesProxy as sessionId (exact value)', async () => {
+    isSovereignBackend.mockReturnValue(true);
+    callConsoleFilesProxy.mockResolvedValue({ status: 'uploaded', layer: 'session' });
+
+    const req = { ...makeReq('t'), body: { conversationId: 'conv-0b1c2d3e' } };
+    await uploadVectors({ req, file: makeFile(), file_id: 'f1' });
+
+    expect(callConsoleFilesProxy).toHaveBeenCalledTimes(1);
+    expect(callConsoleFilesProxy.mock.calls[0][0].sessionId).toBe('conv-0b1c2d3e');
+  });
+
+  it.each([
+    ['a body without conversationId (new chat)', { body: { endpoint: 'AuditTrace' } }],
+    ['no body at all', {}],
+  ])(
+    'passes sessionId undefined for %s (the client then sends no header)',
+    async (_label, extra) => {
+      isSovereignBackend.mockReturnValue(true);
+      callConsoleFilesProxy.mockResolvedValue({ status: 'uploaded' });
+
+      await uploadVectors({ req: { ...makeReq('t'), ...extra }, file: makeFile(), file_id: 'f1' });
+
+      expect(callConsoleFilesProxy.mock.calls[0][0].sessionId).toBeUndefined();
+    },
+  );
+
   // ── (b) forced-layer / narrow posture is the BFF's — the fork forwards
   //        the raw user token and mints NOTHING ──────────────────────
   it('under the sovereign backend, NEVER mints an internal short-lived JWT (that is the BFF/orchestrator posture, not ours)', async () => {
