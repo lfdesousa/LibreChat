@@ -242,6 +242,20 @@ describe('useChatFunctions ask: the new chat seed (LC-10a)', () => {
     expect(peekNewChatSeed(0)).toBe(resent);
   });
 
+  it('AC-22(h1) removing the first of two composer files (same text) takes a fresh seed', () => {
+    const uploadSeed = mintNewChatSeed(0);
+    const composerFiles = fileMap('f1', 'f2');
+    const { submit } = renderNewChat(composerFiles);
+
+    expect(submit('hello')).toBe(uploadSeed);
+    composerFiles.delete('f1');
+    const resent = submit('hello');
+
+    expect(resent).not.toBe(uploadSeed);
+    expect(resent).toMatch(UUID_V4);
+    expect(peekNewChatSeed(0)).toBe(resent);
+  });
+
   it('AC-22(h) the digest follows overrideFiles when given, not the composer map', () => {
     const uploadSeed = mintNewChatSeed(0);
     const composerFiles = fileMap('c1');
