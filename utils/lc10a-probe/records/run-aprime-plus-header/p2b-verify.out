@@ -1,0 +1,5 @@
+PASS 1 new-chat upload carries a seed and no conversationId: fields=['endpoint', 'endpointType', 'file', 'file_id', 'clientRequestId', 'message_file']
+PASS 2 derived id (python) == chat x-session-id: derived=d093ea70-8c62-5bd6-9bba-15ab54765bdd chat=d093ea70-8c62-5bd6-9bba-15ab54765bdd
+PASS 2 derived id (the image's own helper) == chat x-session-id: derived=d093ea70-8c62-5bd6-9bba-15ab54765bdd chat=d093ea70-8c62-5bd6-9bba-15ab54765bdd
+PASS 3 existing-chat upload conversationId == chat x-session-id: upload=d093ea70-8c62-5bd6-9bba-15ab54765bdd chat=d093ea70-8c62-5bd6-9bba-15ab54765bdd
+{"image": "lfds/audittrace-librechat:a886a77", "user_id_len": 24, "seed": "69e3cca5-a2b0-4832-a5a2-3c613b05e259", "chat_completions": 2, "uploads": 2, "all_pass": true}

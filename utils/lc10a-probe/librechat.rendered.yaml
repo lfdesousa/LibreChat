@@ -1,0 +1,15 @@
+version: 1.2.8
+cache: true
+
+endpoints:
+  custom:
+    - name: 'AuditTrace'
+      apiKey: 'dummy'
+      baseURL: 'http://audittrace-librechat-bff:8766/v1'
+      headers:
+        Authorization: 'Bearer {{LIBRECHAT_OPENID_ACCESS_TOKEN}}'
+      models:
+        default: ['audittrace-chat']
+        fetch: false
+      titleConvo: false
+      modelDisplayLabel: 'AuditTrace'

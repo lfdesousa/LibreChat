@@ -12,6 +12,7 @@ import { QueryKeys, FileSources, EModelEndpoint } from 'librechat-data-provider'
 import type { TFile, TFileUpload, TConversation } from 'librechat-data-provider';
 import type { ChatFormValues } from '~/common';
 import { ChatContext, ChatFormProvider } from '~/Providers';
+import { clearNewChatSeed, mintNewChatSeed } from '~/utils';
 import { AuthContextProvider } from '~/hooks/AuthContext';
 import ChatForm from '../ChatForm';
 import store from '~/store';
@@ -66,16 +67,16 @@ class StubImage {
 
 let commits = 0;
 
-function Harness() {
-  const [files, setFiles] = useRecoilState(store.filesByIndex(0));
-  const [isSubmitting] = useRecoilState(store.isSubmittingFamily(0));
+function Harness({ index = 0 }: { index?: number }) {
+  const [files, setFiles] = useRecoilState(store.filesByIndex(index));
+  const [isSubmitting] = useRecoilState(store.isSubmittingFamily(index));
   const [, setFilesLoading] = useState(false);
   const methods = useForm<ChatFormValues>({ defaultValues: { text: '' } });
 
   const chatHelpers = useMemo(
     () =>
       ({
-        index: 0,
+        index,
         conversation,
         setConversation: () => undefined,
         files,
@@ -103,21 +104,21 @@ function Harness() {
         handleRegenerate: () => undefined,
         handleContinue: () => undefined,
       }) as unknown as React.ContextType<typeof ChatContext>,
-    [files, setFiles, isSubmitting],
+    [index, files, setFiles, isSubmitting],
   );
 
   return (
     <ChatFormProvider {...methods}>
       <ChatContext.Provider value={chatHelpers}>
         <Profiler id="composer" onRender={() => (commits += 1)}>
-          <ChatForm index={0} />
+          <ChatForm index={index} />
         </Profiler>
       </ChatContext.Provider>
     </ChatFormProvider>
   );
 }
 
-function renderComposer() {
+function renderComposer(index = 0) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -131,7 +132,7 @@ function renderComposer() {
         <Router>
           <AuthContextProvider authConfig={{ loginRedirect: '', test: true }}>
             <DndProvider backend={HTML5Backend}>
-              <Harness />
+              <Harness index={index} />
             </DndProvider>
           </AuthContextProvider>
         </Router>
@@ -172,6 +173,30 @@ describe('ChatForm attachments', () => {
 
     await waitFor(() => expect(sendButton()).toBeEnabled());
     expect(textarea).toHaveValue('hi');
+  }, 20000);
+
+  /**
+   * LC-10a S3: a new chat's upload seed is held per composer pane. The pane index travels
+   * ChatForm -> AttachFileChat -> AttachFileMenu -> the upload hook; a hop that falls back to 0
+   * would upload a pane-1 file under pane 0's seed.
+   */
+  test('a pane-1 composer uploads under pane 1 seed, not pane 0 seed', async () => {
+    const paneZero = mintNewChatSeed(0);
+    const paneOne = mintNewChatSeed(1);
+    try {
+      const { container } = renderComposer(1);
+      await screen.findByTestId('text-input');
+
+      await attach(container, image());
+      await waitFor(() => expect(mockUpload).toHaveBeenCalled());
+
+      const body: FormData = mockUpload.mock.calls[0][0];
+      expect(paneOne).not.toBe(paneZero);
+      expect(body.get('clientRequestId')).toBe(paneOne);
+    } finally {
+      clearNewChatSeed(0);
+      clearNewChatSeed(1);
+    }
   }, 20000);
 
   test('enables send for an attachment with no composer text', async () => {

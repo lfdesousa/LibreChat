@@ -41,6 +41,7 @@ import {
   storePendingDiscardIds,
   removeTabAttachmentPresence,
   collectForeignAttachmentClaims,
+  clearNewChatSeed,
   scheduleRetainedFileDeletionRetry,
   retainFileDeletion,
   failedFileIdsFrom,
@@ -450,6 +451,13 @@ const useNewConvo = (index = 0) => {
         );
         removeTabAttachmentPresence(discardedFileIds, index);
         setFiles(new Map());
+        /** The seed goes when the composer's files go (LC-10a). Not at the token renewal above:
+         * a failed first submit reaches that renewal too, with its `_`-placeholder template, and
+         * must KEEP the seed for the resend. This block is skipped for it because `...template`
+         * (`:356`) gives `conversation.conversationId` the placeholder, so the NEW_CONVO test at
+         * `:385` is false; do not restructure that test. A route mount passes `modelsData` and
+         * skips the block too. */
+        clearNewChatSeed(index);
         localStorage.setItem(LocalStorageKeys.FILES_TO_DELETE, JSON.stringify({}));
         if (!saveDrafts && filesToDelete.length > 0) {
           /** Another tab's draft or live presence wins over this reset's cleanup: its chip or sent

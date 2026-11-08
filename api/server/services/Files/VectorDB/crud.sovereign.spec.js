@@ -91,6 +91,85 @@ describe('VectorDB/crud — uploadVectors sovereign-backend routing (M3 WU-3)', 
     });
   });
 
+  // ── (a2) LC-10a — the composer's conversation id is forwarded as the
+  //         session id; absent on the first upload of a new chat ────────
+  it('forwards req.body.conversationId to callConsoleFilesProxy as sessionId (exact value)', async () => {
+    isSovereignBackend.mockReturnValue(true);
+    callConsoleFilesProxy.mockResolvedValue({ status: 'uploaded', layer: 'session' });
+
+    const req = { ...makeReq('t'), body: { conversationId: 'conv-0b1c2d3e' } };
+    await uploadVectors({ req, file: makeFile(), file_id: 'f1' });
+
+    expect(callConsoleFilesProxy).toHaveBeenCalledTimes(1);
+    expect(callConsoleFilesProxy.mock.calls[0][0].sessionId).toBe('conv-0b1c2d3e');
+  });
+
+  it.each([
+    ['a body without conversationId (new chat)', { body: { endpoint: 'AuditTrace' } }],
+    ['no body at all', {}],
+  ])(
+    'passes sessionId undefined for %s (the client then sends no header)',
+    async (_label, extra) => {
+      isSovereignBackend.mockReturnValue(true);
+      callConsoleFilesProxy.mockResolvedValue({ status: 'uploaded' });
+
+      await uploadVectors({ req: { ...makeReq('t'), ...extra }, file: makeFile(), file_id: 'f1' });
+
+      expect(callConsoleFilesProxy.mock.calls[0][0].sessionId).toBeUndefined();
+    },
+  );
+
+  // ── (a3) LC-10a A' — a NEW chat's upload derives the id its first submission
+  //         will be minted under, from (req.user.id, clientRequestId) ────────
+  describe("X-Session-Id precedence (A'): conversationId, else the derived seed id, else none", () => {
+    const { deriveNewConversationId } = require('~/server/utils/newConversationId');
+    const sessionIdFor = async (body, user = { id: 'u' }) => {
+      isSovereignBackend.mockReturnValue(true);
+      callConsoleFilesProxy.mockResolvedValue({ status: 'uploaded' });
+      await uploadVectors({
+        req: { ...makeReq('t'), user, body },
+        file: makeFile(),
+        file_id: 'f1',
+      });
+      return callConsoleFilesProxy.mock.calls[0][0].sessionId;
+    };
+
+    it('derives the id from (req.user.id, clientRequestId) when no conversationId is sent (AC-21 identity pin)', async () => {
+      const sessionId = await sessionIdFor({ clientRequestId: 's' });
+
+      expect(sessionId).toBe(deriveNewConversationId('u', 's'));
+      expect(sessionId).toBe('2240435c-9302-5c0a-900c-28ee7f7cbe8c');
+    });
+
+    it('a conversationId wins over a seed (an existing chat)', async () => {
+      expect(await sessionIdFor({ conversationId: 'conv-1', clientRequestId: 's' })).toBe('conv-1');
+    });
+
+    it('an empty conversationId falls through to the seed', async () => {
+      expect(await sessionIdFor({ conversationId: '', clientRequestId: 's' })).toBe(
+        deriveNewConversationId('u', 's'),
+      );
+    });
+
+    it('the derivation is namespaced to the authenticated user', async () => {
+      const mine = await sessionIdFor({ clientRequestId: 's' }, { id: 'u1' });
+      callConsoleFilesProxy.mockClear();
+      const theirs = await sessionIdFor({ clientRequestId: 's' }, { id: 'u2' });
+
+      expect(mine).not.toBe(theirs);
+    });
+
+    it.each([
+      ['a seed with a space', { clientRequestId: 'bad seed' }, { id: 'u' }],
+      ['a 129-character seed', { clientRequestId: 'a'.repeat(129) }, { id: 'u' }],
+      ['a non-string seed', { clientRequestId: ['a', 'b'] }, { id: 'u' }],
+      ['no seed and no conversationId', {}, { id: 'u' }],
+      ['a valid seed but no authenticated user id', { clientRequestId: 's' }, {}],
+    ])('sends no session id for %s', async (_label, body, user) => {
+      expect(await sessionIdFor(body, user)).toBeUndefined();
+    });
+  });
+
   // ── (b) forced-layer / narrow posture is the BFF's — the fork forwards
   //        the raw user token and mints NOTHING ──────────────────────
   it('under the sovereign backend, NEVER mints an internal short-lived JWT (that is the BFF/orchestrator posture, not ours)', async () => {

@@ -12,6 +12,10 @@ const { logAxiosError, generateShortLivedToken } = require('@librechat/api');
 // default (same pattern `memories.js`/`agentMethods.js` already use).
 const { isSovereignBackend } = require('~/server/services/AuditTraceMemory/config');
 const { callConsoleFilesProxy } = require('~/server/services/AuditTraceMemory/consoleFilesClient');
+const {
+  CLIENT_REQUEST_ID_PATTERN,
+  deriveNewConversationId,
+} = require('~/server/utils/newConversationId');
 
 /**
  * Deletes a file from the vector database. This function takes a file object, constructs the full path, and
@@ -57,6 +61,35 @@ const deleteVectors = async (req, file) => {
 };
 
 /**
+ * The `X-Session-Id` an upload is bound to (LC-10a). Precedence:
+ *  1. `req.body.conversationId`, a non-empty string: an existing chat, as at 497b58c;
+ *  2. else, for a chat that does not exist yet, the id the first submission will be minted
+ *     under: `deriveNewConversationId(req.user.id, req.body.clientRequestId)`, the same pure
+ *     function `request.js` mints with, when the seed has the accepted shape;
+ *  3. else undefined: no header, the upload is not bound to a chat.
+ *
+ * The derivation is a correctness device, never a trust boundary: the id is namespaced to the
+ * AUTHENTICATED `req.user.id`, so a client can only choose which of ITS OWN future chats an
+ * upload is compartmented to. The memory server reads `session_id` as a compartment inside
+ * `user_id`, never as authorization.
+ *
+ * @param {ServerRequest} req
+ * @returns {string|undefined}
+ */
+function resolveUploadSessionId(req) {
+  const conversationId = req?.body?.conversationId;
+  if (typeof conversationId === 'string' && conversationId.length > 0) {
+    return conversationId;
+  }
+  const seed = req?.body?.clientRequestId;
+  const userId = req?.user?.id;
+  if (userId && typeof seed === 'string' && CLIENT_REQUEST_ID_PATTERN.test(seed)) {
+    return deriveNewConversationId(userId, seed);
+  }
+  return undefined;
+}
+
+/**
  * The sovereign-backend arm of `uploadVectors` (M3 Sovereign-Attach WU-3).
  * Sends the SAME file bytes the legacy `${RAG_API_URL}/embed` call below
  * would have sent, but to the BFF's `POST /console/files` (WU-2), carrying
@@ -79,7 +112,9 @@ const deleteVectors = async (req, file) => {
  * to the Mongo/RAG path below.
  *
  * @param {object} params
- * @param {ServerRequest} params.req
+ * @param {ServerRequest} params.req - the composer's multipart `conversationId`
+ *   (an existing chat) or `clientRequestId` seed (a new chat) decides the BFF's
+ *   `X-Session-Id` (LC-10a; see `resolveUploadSessionId`).
  * @param {Express.Multer.File} params.file
  * @returns {Promise<{ bytes: number, filename: string, filepath: string, embedded: boolean }>}
  */
@@ -90,6 +125,7 @@ async function uploadVectorsSovereign({ req, file }) {
     filePath: file.path,
     filename: file.originalname,
     contentType: file.mimetype,
+    sessionId: resolveUploadSessionId(req),
   });
   logger.debug('Response from sovereign console-files upload', response);
 

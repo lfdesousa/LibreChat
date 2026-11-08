@@ -30,6 +30,48 @@ const { getConfig } = require('./config');
 const { MissingAccessTokenError, SovereignMemoryError } = require('./errors');
 
 /**
+ * The accepted shape of an `X-Session-Id` value (LC-10a R-Q5): printable ASCII without space,
+ * 1 to 255 characters. The memory server enforces the same literal with `re.fullmatch`
+ * (`header_session_id`); this is the origin-side check, so a value the server would reject is
+ * never sent (and a control character never reaches `http.validateHeaderValue`, which would throw
+ * and surface as a 502). JS `$` (no `m` flag) matches only at the very end of the input, so a
+ * trailing line feed fails here exactly as it fails `fullmatch` there.
+ */
+const SESSION_ID_PATTERN = /^[\x21-\x7e]{1,255}$/;
+
+/** An unresolved template placeholder (`{{...}}`) matches the shape but names no chat: every such
+ * request would pool into one compartment. The server rejects it too. */
+const TEMPLATE_MARKERS = ['{{', '}}'];
+
+/**
+ * The header value for `sessionId`, or undefined for no header at all. Only SPACES are stripped
+ * (the server's `strip(" ")`): stripping tabs or line feeds would let `"abc\n"` through as `"abc"`.
+ * Blank means absent, silently; a non-blank value that fails the shape warns with its LENGTH only.
+ *
+ * @param {unknown} sessionId
+ * @returns {string|undefined}
+ */
+function sessionHeaderValue(sessionId) {
+  if (typeof sessionId !== 'string') {
+    return undefined;
+  }
+  const value = sessionId.replace(/^ +| +$/g, '');
+  if (value === '') {
+    return undefined;
+  }
+  if (
+    !SESSION_ID_PATTERN.test(value) ||
+    TEMPLATE_MARKERS.some((marker) => value.includes(marker))
+  ) {
+    logger.warn('[AuditTraceMemory] X-Session-Id value rejected by shape; sending no header', {
+      length: value.length,
+    });
+    return undefined;
+  }
+  return value;
+}
+
+/**
  * @param {object} params
  * @param {string|null|undefined} params.token - the user's Keycloak OIDC
  *   access token. NEVER minted here — the caller reads it off
@@ -41,6 +83,12 @@ const { MissingAccessTokenError, SovereignMemoryError } = require('./errors');
  *   the multipart part, so the orchestrator's `/memory/upload` sees the
  *   real name rather than a temp-path basename.
  * @param {string} [params.contentType] - the file's MIME type, if known.
+ * @param {string|null|undefined} [params.sessionId] - the chat's conversation
+ *   id (LC-10a). Sent as the `X-Session-Id` request header so the BFF can bind
+ *   the upload to its chat. Spaces are stripped; empty / blank / non-string /
+ *   a value outside `SESSION_ID_PATTERN` or holding `{{` / `}}` means NO header
+ *   at all (never an empty `X-Session-Id:`, never a throw), the memory-server
+ *   rule (`header_session_id`) applied at the origin.
  * @returns {Promise<Record<string, unknown>>} the BFF response body,
  *   UNCHANGED (the session-memory key/id WU-5 recall will reference).
  * @throws {MissingAccessTokenError} if `token` is falsy — the BFF is
@@ -50,7 +98,7 @@ const { MissingAccessTokenError, SovereignMemoryError } = require('./errors');
  *   response (status mirrors the upstream response byte-for-byte) or a
  *   transport failure (mapped to 502).
  */
-async function callConsoleFilesProxy({ token, filePath, filename, contentType }) {
+async function callConsoleFilesProxy({ token, filePath, filename, contentType, sessionId }) {
   if (!token) {
     throw new MissingAccessTokenError();
   }
@@ -64,13 +112,19 @@ async function callConsoleFilesProxy({ token, filePath, filename, contentType })
     contentType,
   });
 
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    ...formData.getHeaders(),
+  };
+  const sessionHeader = sessionHeaderValue(sessionId);
+  if (sessionHeader !== undefined) {
+    headers['X-Session-Id'] = sessionHeader;
+  }
+
   let response;
   try {
     response = await axios.post(url, formData, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...formData.getHeaders(),
-      },
+      headers,
       timeout: timeoutMs,
       // Status is inspected explicitly below (fail-closed relay) rather
       // than letting axios throw and lose the distinction between "the
@@ -97,4 +151,4 @@ async function callConsoleFilesProxy({ token, filePath, filename, contentType })
   return response.data;
 }
 
-module.exports = { callConsoleFilesProxy };
+module.exports = { callConsoleFilesProxy, SESSION_ID_PATTERN };

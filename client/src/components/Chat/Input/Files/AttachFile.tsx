@@ -12,12 +12,15 @@ const AttachFile = ({
   setFiles,
   setFilesLoading,
   conversation,
+  index,
 }: {
   disabled?: boolean | null;
   files: Map<string, ExtendedFile>;
   setFiles: FileSetter;
   setFilesLoading: React.Dispatch<React.SetStateAction<boolean>>;
   conversation: TConversation | null;
+  /** The composer pane: a new chat's upload seed is held per pane (LC-10a). */
+  index: number;
 }) => {
   const localize = useLocalize();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -30,6 +33,7 @@ const AttachFile = ({
     setFiles,
     setFilesLoading,
     conversation,
+    index,
   });
 
   return (
