@@ -21,12 +21,15 @@ function AttachFileChat({
   files,
   setFiles,
   setFilesLoading,
+  index,
 }: {
   disableInputs: boolean;
   conversation: TConversation | null;
   files: Map<string, ExtendedFile>;
   setFiles: FileSetter;
   setFilesLoading: React.Dispatch<React.SetStateAction<boolean>>;
+  /** The composer pane (a new chat's upload seed is held per pane). */
+  index: number;
 }) {
   const conversationId = conversation?.conversationId ?? Constants.NEW_CONVO;
   const { endpoint } = conversation ?? { endpoint: null };
@@ -105,6 +108,7 @@ function AttachFileChat({
         setFiles={setFiles}
         setFilesLoading={setFilesLoading}
         conversation={conversation}
+        index={index}
       />
     );
   } else if ((isAgents || endpointSupportsFiles) && !isUploadDisabled) {
@@ -121,6 +125,7 @@ function AttachFileChat({
         setFiles={setFiles}
         setFilesLoading={setFilesLoading}
         conversation={conversation}
+        index={index}
       />
     );
   }

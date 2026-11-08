@@ -65,6 +65,7 @@ function renderComponent(conversation: Record<string, unknown> | null, disableIn
           files={new Map()}
           setFiles={() => {}}
           setFilesLoading={() => {}}
+          index={0}
         />
       </RecoilRoot>
     </QueryClientProvider>,

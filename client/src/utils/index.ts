@@ -17,6 +17,7 @@ export * from './roles';
 export * from './errors';
 export * from './agents';
 export * from './drafts';
+export * from './newChatSeed';
 export * from './convos';
 export * from './routes';
 export * from './presets';

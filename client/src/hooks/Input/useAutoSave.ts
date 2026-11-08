@@ -16,6 +16,7 @@ import {
   isFilesDraftOwnedByThisTab,
   isNewConversationDraftId,
   mayWriteComposerText,
+  observeNewChatSubmission,
   migrateFilesDraft,
   migrateTextDraft,
   publishTabAttachmentIds,
@@ -260,6 +261,15 @@ export const useAutoSave = ({
       handleInputSlow.cancel();
     };
   }, [activeStorageId, saveDrafts, textAreaRef]);
+
+  /** (C1) Ends the new chat's seed once its first send has succeeded, i.e. the composer left
+   * NEW_CONVO / null for the server's conversation id. A dedicated effect with no `saveDrafts`
+   * gate: the switch effect below returns early when drafts are off, and a stale seed there
+   * would fold the next new chat's uploads into this one's id. It acts on the NEW-chat record
+   * and the in-tab slot (`clearNewChatSeed`), never on the migrated pending record. */
+  useEffect(() => {
+    observeNewChatSubmission(index, _conversationId, isSubmitting === true);
+  }, [index, _conversationId, isSubmitting]);
 
   const prevConversationIdRef = useRef<string | null>(null);
   const pendingDestinationRef = useRef<string | null>(null);

@@ -47,6 +47,7 @@ beforeAll(() => {
 });
 
 const mockShowToast = jest.fn();
+const mockMintNewChatSeed = jest.fn((..._args: unknown[]) => 'seed-from-mock');
 const mockSetFilesLoading = jest.fn();
 const mockMutate = jest.fn();
 const mockProcessFileForUpload = jest.fn(
@@ -163,6 +164,7 @@ jest.mock('~/utils', () => {
     cachePreview: jest.fn(),
     getCachedPreview: jest.fn(() => undefined),
     removePreviewEntry: jest.fn(),
+    mintNewChatSeed: (...args: unknown[]) => mockMintNewChatSeed(...args),
   };
 });
 
@@ -187,6 +189,7 @@ describe('useFileHandling', () => {
     mockIsTemporary = false;
     mockImageDecodes = true;
     mockUploadOptions = {};
+    mockMintNewChatSeed.mockReturnValue('seed-from-mock');
   });
 
   const loadHook = async () => (await import('../useFileHandling')).default;

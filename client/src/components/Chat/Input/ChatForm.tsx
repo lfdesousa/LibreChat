@@ -709,6 +709,7 @@ const ChatForm = memo(function ChatForm({
                     files={files}
                     setFiles={setFiles}
                     setFilesLoading={setFilesLoading}
+                    index={index}
                   />
                 </div>
                 <BadgeRow

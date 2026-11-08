@@ -35,10 +35,13 @@ import { useChatFormContext } from '~/Providers';
 import { useGetFiles } from '~/data-provider';
 import { hasInFlightUpload } from '~/hooks/Files/useFileHandling';
 import {
+  clearNewChatSeed,
   encodeBase64,
   getAskAnswerDraftId,
   getDraft,
   getFilesDraft,
+  mintNewChatSeed,
+  peekNewChatSeed,
   setDraft,
   setFilesDraft,
 } from '~/utils';
@@ -951,5 +954,75 @@ describe('useAutoSave — file cache updates', () => {
     });
 
     expect(mockSetValue).toHaveBeenCalledWith('text', 'closed tab text');
+  });
+});
+
+describe('useAutoSave: the new chat seed lifecycle (C1, AC-22(f))', () => {
+  const NEW = Constants.NEW_CONVO as string;
+  type Props = { conversationId: string | null; isSubmitting: boolean };
+
+  const renderComposer = (initialProps: Props) =>
+    renderHook(
+      ({ conversationId, isSubmitting }: Props) =>
+        useAutoSave({
+          conversationId,
+          isSubmitting,
+          textAreaRef: makeTextAreaRef(),
+          files: new Map(),
+          setFiles: jest.fn(),
+        }),
+      { initialProps },
+    );
+
+  const setSaveDrafts = (on: boolean) =>
+    (useRecoilValue as jest.Mock).mockImplementation((atom) =>
+      atom === store.saveDrafts ? on : undefined,
+    );
+
+  beforeEach(() => clearNewChatSeed(0));
+  afterEach(() => clearNewChatSeed(0));
+
+  it.each([true, false])(
+    'ends the seed when the first send succeeds, so the next new chat starts clean (saveDrafts %s)',
+    (saveDrafts) => {
+      setSaveDrafts(saveDrafts);
+      const first = mintNewChatSeed(0, saveDrafts);
+      const { rerender } = renderComposer({ conversationId: NEW, isSubmitting: false });
+
+      /** Submit: the composer hands off on null with the run in flight; the server id arrives. */
+      act(() => rerender({ conversationId: NEW, isSubmitting: true }));
+      act(() => rerender({ conversationId: null, isSubmitting: true }));
+      expect(peekNewChatSeed(0)).toBe(first);
+      act(() => rerender({ conversationId: 'server-convo-1', isSubmitting: true }));
+
+      expect(peekNewChatSeed(0)).toBeUndefined();
+      expect(getFilesDraft('new').clientRequestId).toBeUndefined();
+
+      /** A second new chat entered without the New Chat button mints its own seed. */
+      act(() => rerender({ conversationId: NEW, isSubmitting: false }));
+      expect(mintNewChatSeed(0, saveDrafts)).not.toBe(first);
+    },
+  );
+
+  it('keeps the seed for the resend when the first submit fails and the composer returns to a new chat', () => {
+    const seed = mintNewChatSeed(0, true);
+    const { rerender } = renderComposer({ conversationId: NEW, isSubmitting: false });
+
+    act(() => rerender({ conversationId: NEW, isSubmitting: true }));
+    act(() => rerender({ conversationId: '_failed-first-submit', isSubmitting: false }));
+    act(() => rerender({ conversationId: NEW, isSubmitting: false }));
+
+    expect(peekNewChatSeed(0)).toBe(seed);
+    expect(getFilesDraft('new').clientRequestId).toBe(seed);
+  });
+
+  it('keeps the seed when the user opens another chat without having submitted', () => {
+    const seed = mintNewChatSeed(0, true);
+    const { rerender } = renderComposer({ conversationId: NEW, isSubmitting: false });
+
+    act(() => rerender({ conversationId: 'server-convo-9', isSubmitting: false }));
+    act(() => rerender({ conversationId: NEW, isSubmitting: false }));
+
+    expect(peekNewChatSeed(0)).toBe(seed);
   });
 });

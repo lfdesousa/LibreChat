@@ -35,6 +35,8 @@ import {
   createDualMessageContent,
   getRouteChatProjectId,
   stripStreamedIndexStamps,
+  resolveNewChatSeed,
+  submissionDigest,
 } from '~/utils';
 import useFocusRegeneratedResponse from '~/hooks/Chat/useFocusRegeneratedResponse';
 import useSetFilesToDelete from '~/hooks/Files/useSetFilesToDelete';
@@ -219,6 +221,7 @@ export default function useChatFunctions({
   const setFilesToDelete = useSetFilesToDelete();
   const getEphemeralAgent = useGetEphemeralAgent();
   const isTemporary = useRecoilValue(store.isTemporary);
+  const saveDrafts = useRecoilValue<boolean>(store.saveDrafts);
   const { getExpiry } = useUserKey(immutableConversation?.endpoint ?? '');
   const setIsSubmitting = useSetRecoilState(store.isSubmittingFamily(index));
   const setSubmissionStart = useSetRecoilState(store.submissionStartFamily(index));
@@ -431,10 +434,29 @@ export default function useChatFunctions({
     // construct the query message
     // this is not a real messageId, it is used as placeholder before real messageId returned
     const intermediateId = overrideUserMessageId ?? v4();
+    const submissionFileRefs: Array<{ file_id: string }> = [];
+    for (const file of overrideFiles ?? files?.values() ?? []) {
+      if (file.file_id) {
+        submissionFileRefs.push({ file_id: file.file_id });
+      }
+    }
     /** Stable idempotency key for this submission: fresh per `ask()` (so regenerate differs)
      *  but reused across the client's start-generation network retries, letting the server
-     *  dedup a retried request instead of starting a second billed generation. */
-    const clientRequestId = overrideClientRequestId ?? v4();
+     *  dedup a retried request instead of starting a second billed generation.
+     *
+     *  A NEW chat's first submission takes the seed its uploads already carry (LC-10a), so the
+     *  server mints the conversation id the files were bound to. `conversationId` is read here,
+     *  before the hand-off below nulls it. An edited resend takes a fresh seed (the digest rule);
+     *  a chat that never attached holds no seed and gets `v4()` as before. An explicit override
+     *  (queued, steered or recovered sends) always wins. */
+    const clientRequestId =
+      overrideClientRequestId ??
+      (conversationId == Constants.NEW_CONVO
+        ? resolveNewChatSeed(index, submissionDigest(text, submissionFileRefs), saveDrafts, {
+            textLength: text.length,
+            fileCount: submissionFileRefs.length,
+          })
+        : v4());
     if (parentMessageId == null) {
       parentMessageId = getAppendParentMessageId({ latestMessage, currentMessages });
     }

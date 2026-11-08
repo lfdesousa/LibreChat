@@ -81,6 +81,8 @@ interface AttachFileMenuProps {
   setFiles: FileSetter;
   setFilesLoading: React.Dispatch<React.SetStateAction<boolean>>;
   conversation: TConversation | null;
+  /** The composer pane: a new chat's upload seed is held per pane (LC-10a). */
+  index: number;
 }
 
 const AttachFileMenu = ({
@@ -95,6 +97,7 @@ const AttachFileMenu = ({
   setFiles,
   setFilesLoading,
   conversation,
+  index,
 }: AttachFileMenuProps) => {
   const localize = useLocalize();
   const isUploadDisabled = disabled ?? false;
@@ -111,11 +114,12 @@ const AttachFileMenu = ({
     setFiles,
     setFilesLoading,
     conversation,
+    index,
   });
   const { handleSharePointFiles, isProcessing, downloadProgress } =
     useSharePointFileHandlingNoChatContext(
       { toolResource: toolResourceRef.current },
-      { files, setFiles, setFilesLoading, conversation },
+      { files, setFiles, setFilesLoading, conversation, index },
     );
 
   const { agentsConfig } = useGetAgentsConfig();

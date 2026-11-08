@@ -10,6 +10,7 @@ import {
   beginRetainedDeletionPass,
   clearAllDrafts,
   clearMessagesCache,
+  clearNewChatSeed,
   clearRetainedFileDeletion,
   failedFileIdsFrom,
   getFilesDraft,
@@ -445,6 +446,9 @@ export default function useNewChat({
     if (isFilesDraftOwnedByThisTab(idleDraft)) {
       clearAllDrafts(draftId);
     }
+    /** The New Chat button ends the idle chat's seed with its record (LC-10a). Outside the owner
+     * test on purpose: the in-tab slot always goes; the record half is owner-gated inside. */
+    clearNewChatSeed(index);
     const discardedFileIds = Array.from(
       new Set([
         ...inFlightPasteIds,

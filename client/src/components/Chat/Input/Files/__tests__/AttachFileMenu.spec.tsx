@@ -141,6 +141,7 @@ function renderMenu(props: Record<string, unknown> = {}) {
           setFiles={() => {}}
           setFilesLoading={() => {}}
           conversation={null}
+          index={0}
           {...props}
         />
       </RecoilRoot>
@@ -444,6 +445,22 @@ describe('AttachFileMenu', () => {
       setupMocks();
       renderMenu({ agentId: '', endpointType: EModelEndpoint.openAI });
       expect(screen.getByRole('button', { name: /attach file options/i })).toBeInTheDocument();
+    });
+  });
+
+  describe('composer pane (LC-10a, S3)', () => {
+    it('hands its pane index to the upload hook and to the SharePoint upload hook', () => {
+      setupMocks();
+      renderMenu({ index: 1 });
+
+      expect(mockUseFileHandlingNoChatContext).toHaveBeenCalledWith(
+        undefined,
+        expect.objectContaining({ index: 1 }),
+      );
+      expect(mockUseSharePointFileHandlingNoChatContext).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ index: 1 }),
+      );
     });
   });
 });

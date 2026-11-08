@@ -22,6 +22,7 @@ import {
   cachePreview,
   validateFileSizes,
   getCachedPreview,
+  mintNewChatSeed,
   removePreviewEntry,
   validateFileDuplicates,
 } from '~/utils';
@@ -48,6 +49,10 @@ export type FileHandlingState = {
   setFiles: FileSetter;
   setFilesLoading?: React.Dispatch<React.SetStateAction<boolean>>;
   conversation?: TConversation | null;
+  /** The composer pane this state belongs to. A new chat's seed is held per pane (LC-10a), so the
+   * composer callers pass their own; the agent/assistant builder panels have none and upload no
+   * seed (`isConversationUpload` is false for them). */
+  index?: number;
 };
 
 type ProcessedUpload = {
@@ -157,6 +162,8 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
     ephemeralAgentByConvoId(conversation?.conversationId ?? Constants.NEW_CONVO),
   );
   const isTemporary = useRecoilValue(store.isTemporary);
+  const saveDrafts = useRecoilValue<boolean>(store.saveDrafts);
+  const index = fileState.index ?? 0;
   const setError = (error: string) => setErrors((prevErrors) => [...prevErrors, error]);
   const { addFile, replaceFile, updateFileById, deleteFileById } = useUpdateFiles(fileSetter);
   const { isConfigPending, waitForConfig, resizeImageIfNeeded } = useClientResize();
@@ -329,6 +336,11 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
       conversation.conversationId !== Constants.NEW_CONVO
     ) {
       formData.append('conversationId', conversation.conversationId);
+    } else if (isConversationUpload) {
+      /** A chat that does not exist yet (the composer is on NEW_CONVO, or its first turn is in
+       * flight and the server id has not arrived): send the chat's seed so the server derives the
+       * same conversation id the first submission will be minted under (LC-10a). */
+      formData.append('clientRequestId', mintNewChatSeed(index, saveDrafts));
     }
     if (isTemporary && isConversationUpload) {
       formData.append('isTemporary', 'true');
@@ -775,13 +787,14 @@ export const useFileHandlingNoChatContext = (
 ) => useFileHandlingCore(params, fileState);
 
 const useFileHandling = (params?: UseFileHandling) => {
-  const { files, setFiles, setFilesLoading, conversation } = useChatContext();
+  const { files, setFiles, setFilesLoading, conversation, index } = useChatContext();
 
   return useFileHandlingCore(params, {
     files,
     setFiles,
     conversation,
     setFilesLoading,
+    index,
   });
 };
 

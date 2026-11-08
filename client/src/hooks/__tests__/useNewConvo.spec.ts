@@ -53,6 +53,8 @@ jest.mock('librechat-data-provider', () => ({
   ...jest.requireActual('librechat-data-provider'),
 }));
 
+const mockClearNewChatSeed = jest.fn();
+
 jest.mock('~/utils', () => ({
   updateLastSelectedModel: jest.fn(),
   getLocalStorageItems: () => ({}),
@@ -67,6 +69,7 @@ jest.mock('~/utils', () => ({
   getNewConversationDraftId: (index = 0) => (index === 0 ? 'new' : `new:${index}`),
   getPendingDraftId: (index = 0) => (index === 0 ? 'pending' : `pending:${index}`),
   renewNewConversationDraftToken: jest.fn(),
+  clearNewChatSeed: (...args: unknown[]) => mockClearNewChatSeed(...args),
   removeTabAttachmentPresence: (...args: unknown[]) => mockRemoveTabAttachmentPresence(...args),
   loadPendingDiscardIds: () => [...mockPendingDiscardIds],
   storePendingDiscardIds: (index: number, ids: string[]) => mockStorePendingDiscardIds(index, ids),
@@ -179,5 +182,40 @@ describe('useNewConvo reset cleanup', () => {
 
     expect(mockStorePendingDiscardIds).toHaveBeenCalledWith(0, ['inflight-paste']);
     expect(mockPendingDiscardIds).toEqual(new Set(['inflight-paste']));
+  });
+
+  describe('new-chat seed (C2)', () => {
+    it('ends the pane seed when the reset discards the composer files', () => {
+      const { result } = renderHook(() => useNewConvo(1));
+
+      act(() => {
+        result.current.newConversation();
+      });
+
+      expect(mockClearNewChatSeed).toHaveBeenCalledTimes(1);
+      expect(mockClearNewChatSeed).toHaveBeenCalledWith(1);
+    });
+
+    it('keeps the seed for the resend when a failed first submit cancels back to a new chat', () => {
+      /** The cancel template carries the `_`-placeholder id (useEventHandlers errorHandler), so
+       * `...template` makes the discard block's NEW_CONVO test false and the files survive. */
+      const { result } = renderHook(() => useNewConvo(0));
+
+      act(() => {
+        result.current.newConversation({ template: { conversationId: '_failed-first-submit' } });
+      });
+
+      expect(mockClearNewChatSeed).not.toHaveBeenCalled();
+    });
+
+    it('keeps the seed across a route mount into /c/new (modelsData skips the discard block)', () => {
+      const { result } = renderHook(() => useNewConvo(0));
+
+      act(() => {
+        result.current.newConversation({ modelsData: { initial: [] } as never });
+      });
+
+      expect(mockClearNewChatSeed).not.toHaveBeenCalled();
+    });
   });
 });

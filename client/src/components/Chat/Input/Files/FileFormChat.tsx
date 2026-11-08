@@ -47,6 +47,7 @@ function FileFormChat({
     setFiles,
     setFilesLoading,
     conversation,
+    index,
   });
 
   const isRTL = chatDirection === 'rtl';

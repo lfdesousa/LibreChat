@@ -7,6 +7,7 @@ const mockNewConversation = jest.fn();
 const mockClearMessagesCache = jest.fn();
 const mockInvalidateQueries = jest.fn();
 const mockClearAllDrafts = jest.fn();
+const mockClearNewChatSeed = jest.fn();
 const mockDeleteFiles = jest.fn();
 const mockScheduleRetainedRetry = jest.fn();
 
@@ -78,6 +79,7 @@ jest.mock('~/hooks/useNewConvo', () => ({
 jest.mock('~/utils', () => ({
   clearMessagesCache: (...args: unknown[]) => mockClearMessagesCache(...args),
   clearAllDrafts: (...args: unknown[]) => mockClearAllDrafts(...args),
+  clearNewChatSeed: (...args: unknown[]) => mockClearNewChatSeed(...args),
   getNewConversationDraftId: (index = 0) => (index === 0 ? 'new' : `new:${index}`),
   getPendingDraftId: (index = 0) => (index === 0 ? 'pending' : `pending:${index}`),
   getComposerDraftId: (index = 0, conversationId?: string | null) => {
@@ -278,6 +280,15 @@ describe('useNewChat', () => {
 
     expect(mockClearAllDrafts).toHaveBeenCalledWith('new:1');
     expect(mockClearAllDrafts).not.toHaveBeenCalledWith('new');
+  });
+
+  it('ends only its own pane new-chat seed with the draft (C3)', () => {
+    const { result } = renderHook(() => useNewChat({ index: 1 }));
+
+    act(() => result.current.startNewChat());
+
+    expect(mockClearNewChatSeed).toHaveBeenCalledTimes(1);
+    expect(mockClearNewChatSeed).toHaveBeenCalledWith(1);
   });
 
   it('deletes the draft uploads a draft-saving user is discarding with the draft', () => {
