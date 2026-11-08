@@ -15,6 +15,8 @@ before anything is changed.
 
 The original bytes are held in memory and put back by a context manager on every exit
 path, including an exception or KeyboardInterrupt; no backup file is written.
+A SIGKILL or SIGTERM mid-run cannot run the restore and leaves the source mutated:
+recover it with `git checkout -- <file>`.
 """
 import contextlib
 import json

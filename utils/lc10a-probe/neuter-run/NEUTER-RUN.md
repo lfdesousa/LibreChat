@@ -100,3 +100,11 @@ Tests added in `useChatFunctions.newChatSeed.spec.tsx`: swapping one composer fi
 | 4   | B-3 digest hashes only the first file id                          | 2 failed, 8 passed, 10 total | 10 passed, 10 total | RED->GREEN |
 
 `neuter.py` was rewritten in r3: a context manager restores the original bytes from memory (no backup file), files are opened with `with`, the anchor must match exactly once, and RED means a test FAILED (a syntax or collection error is reported as ERROR, an unchanged pass as NOT-PROVEN). Self-test: a syntax-error neuter reports ERROR (`Tests: 0 total`), an anchor matching 77 times and one matching 0 times are both refused with exit 1 and leave the file untouched.
+
+## Round r4 (review r3 advisory A-r3-1)
+
+One test added: composer files f1,f2 then f2 with the same text takes a fresh seed (spec now 11 tests).
+
+| #   | neuter                                                  | neutered                      | restored            | verdict    |
+| --- | ------------------------------------------------------- | ----------------------------- | ------------------- | ---------- |
+| 1   | A-r3-1 digest hashes only the LAST file id (.slice(-1)) | 1 failed, 10 passed, 11 total | 11 passed, 11 total | RED->GREEN |

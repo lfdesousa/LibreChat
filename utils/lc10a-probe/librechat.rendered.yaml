@@ -3,13 +3,13 @@ cache: true
 
 endpoints:
   custom:
-    - name: "AuditTrace"
+    - name: 'AuditTrace'
       apiKey: 'dummy'
-      baseURL: "http://audittrace-librechat-bff:8766/v1"
+      baseURL: 'http://audittrace-librechat-bff:8766/v1'
       headers:
         Authorization: 'Bearer {{LIBRECHAT_OPENID_ACCESS_TOKEN}}'
       models:
-        default: ["audittrace-chat"]
+        default: ['audittrace-chat']
         fetch: false
       titleConvo: false
-      modelDisplayLabel: "AuditTrace"
+      modelDisplayLabel: 'AuditTrace'
