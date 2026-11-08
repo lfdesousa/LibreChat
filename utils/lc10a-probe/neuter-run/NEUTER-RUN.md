@@ -71,5 +71,17 @@ Runner: jest 30, jsdom for `client/`, node for `api/`. No wall-clock asserts; no
 - A first N1 ask-level neuter had a syntax error (`0 total`), which is RED for the wrong reason; replaced by the `resolveNewChatSeed` mutation (row above).
 
 ## Parity: client shape check vs the memory server's `header_session_id`
-`parity/server_side.py` executes the VERBATIM source of `header_session_id` from AuditTrace-AI `6a42c499` (`_session_bind.py`, sha256 prefix 1ae0f1659aa47163) over `parity/cases.json` (27 values); `parity/client_side.js` runs the same values through `callConsoleFilesProxy` (axios stubbed) and records the `X-Session-Id` it would send.
+`parity/server_side.py` executes the VERBATIM source of `header_session_id` from AuditTrace-AI `6a42c499` (`_session_bind.py`, sha256 prefix 1ae0f1659aa47163; the source file is NOT shipped in this public fork: it is kept in the private evidence folder (private evidence, not published), and `server_side.py` takes its path as argv[1]) over `parity/cases.json` (27 values); `parity/client_side.js` runs the same values through `callConsoleFilesProxy` (axios stubbed) and records the `X-Session-Id` it would send.
 Result: **27 of 27 cases equal (0 differences)**, including 256 characters, U+0000, a trailing and a leading line feed, CR/LF, tab, U+00FF, inner space, `{{`, `}}`, `{ {`, `}{`, and the 255-character boundary. Outputs: `parity/server.json`, `parity/client.json`.
+
+## Round r2 (review r1 B-1, B-2): added tests and their neuters
+
+| # | neuter | neutered | restored | verdict |
+|---|---|---|---|---|
+| 1 | B-1 ChatForm.tsx AttachFileChat index={index} -> index={0} | 1 failed, 29 passed, 30 total | 30 passed, 30 total | RED->GREEN |
+| 2 | B-1 AttachFileChat.tsx AttachFile index={index} -> index={0} | 1 failed, 29 passed, 30 total | 30 passed, 30 total | RED->GREEN |
+| 3 | B-1 AttachFileChat.tsx AttachFileMenu index={index} -> index={0} | 2 failed, 28 passed, 30 total | 30 passed, 30 total | RED->GREEN |
+| 4 | B-2 digest ignores the file set: submissionDigest(text, []) | 2 failed, 6 passed, 8 total | 8 passed, 8 total | RED->GREEN |
+| 5 | B-2 digest ignores overrideFiles (composer map only) | 1 failed, 7 passed, 8 total | 8 passed, 8 total | RED->GREEN |
+
+Tests added: `AttachFileChat.spec.tsx` (index reaches AttachFileMenu and AttachFile), `ChatForm.attachments.spec.tsx` (a pane-1 composer uploads under pane 1's seed, through the real ChatForm -> AttachFileChat -> AttachFileMenu -> upload hook chain), `useChatFunctions.newChatSeed.spec.tsx` (same text + changed composer files -> fresh seed; digest follows overrideFiles).

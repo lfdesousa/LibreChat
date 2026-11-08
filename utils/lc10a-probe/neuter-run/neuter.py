@@ -4,7 +4,7 @@ import sys, subprocess, shutil, os, json
 label, f, old, new, cwd, *args = sys.argv[1:]
 bak = f + '.neuter-bak'
 shutil.copy(f, bak)
-log = os.path.expanduser('neuter-results.jsonl')
+log = os.environ.get('NEUTER_LOG', 'neuter-results.jsonl')  # append target; override with NEUTER_LOG
 def run():
     p = subprocess.run(['npx','jest',*args], cwd=cwd, capture_output=True, text=True, timeout=900)
     out = p.stdout + p.stderr
