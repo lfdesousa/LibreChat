@@ -1,5 +1,8 @@
 const { logger, tenantStorage } = require('@librechat/data-schemas');
-const { v5: uuidv5 } = require('uuid');
+const {
+  CLIENT_REQUEST_ID_PATTERN,
+  deriveNewConversationId,
+} = require('~/server/utils/newConversationId');
 const {
   Constants,
   EModelEndpoint,
@@ -439,11 +442,6 @@ const JOB_RECORD_WAIT_DELAY_MS = 60;
 // than hand back a stream that would 404). Past it, a missing job means the original
 // already completed and was cleaned up (attach and let the client refetch).
 const IDEMPOTENCY_STARTUP_GRACE_MS = 5000;
-const CLIENT_REQUEST_ID_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/;
-/** New-chat retries do not carry a conversation id, so derive the stream id
- * from their stable per-submission id. This keeps both the dedupe key and the
- * Redis hash slot identical across a lost-response retry. */
-const NEW_CONVERSATION_IDEMPOTENCY_NAMESPACE = 'd7f2518c-94b8-4fe8-97ad-2d4bdb2c9f43';
 
 function isValidGenerationClaim(value, streamId, conversationId, requireStarted = false) {
   return (
@@ -725,7 +723,7 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
     conversationId =
       scheduledNewConversationId ??
       (typeof clientRequestId === 'string' && clientRequestId.length > 0
-        ? uuidv5(`${userId}:${clientRequestId}`, NEW_CONVERSATION_IDEMPOTENCY_NAMESPACE)
+        ? deriveNewConversationId(userId, clientRequestId)
         : crypto.randomUUID());
   }
   const conversationAnchorPromise = resolveConversationCreatedAt({

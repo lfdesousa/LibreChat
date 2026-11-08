@@ -2642,6 +2642,41 @@ describe('ResumableAgentController resume metadata', () => {
     );
   });
 
+  it("mints a new chat's conversation id from (userId, clientRequestId) through the shared helper (AC-21)", async () => {
+    const { deriveNewConversationId } = require('~/server/utils/newConversationId');
+    mockGenerationJobManager.claimGeneration.mockResolvedValue(wonGenerationClaim());
+    const req = {
+      user: { id: 'u' },
+      body: {
+        text: 'First turn of a new chat',
+        messageId: 'user-msg',
+        clientRequestId: 's',
+        conversationId: 'new',
+        endpointOption: { endpoint: 'agents', modelOptions: { model: 'gpt-4.1' } },
+      },
+      config: {},
+    };
+    const res = createResumableResponse();
+
+    await AgentController(
+      req,
+      res,
+      jest.fn(),
+      jest.fn().mockRejectedValue(new Error('stop')),
+      null,
+    );
+
+    const minted = '2240435c-9302-5c0a-900c-28ee7f7cbe8c';
+    expect(deriveNewConversationId('u', 's')).toBe(minted);
+    expect(mockGenerationJobManager.claimGeneration).toHaveBeenCalledWith(
+      'u',
+      's',
+      minted,
+      minted,
+      1,
+    );
+  });
+
   it('does not consume a recovered steer when client initialization fails before persistence', async () => {
     mockGenerationJobManager.claimGeneration.mockResolvedValue(
       wonGenerationClaim({ claimToken: 'recovery-claim-token' }),
