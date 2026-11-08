@@ -13,7 +13,7 @@ Records: `records/run-aprime-plus-header/{p1,p2}.jsonl`; verifier output: `p2b-v
   (fields: endpoint, endpointType, file, file_id, clientRequestId, message_file). At 768de61 (VERDICT.md) it carried neither.
 - Check 2 (the equality AC-P2b names): uuid5("<user _id>:<seed>", d7f2518c-94b8-4fe8-97ad-2d4bdb2c9f43) == the `x-session-id` the BFF recorder
   saw on the new chat's `/v1/chat/completions` == `deriveNewConversationId(userId, seed)` executed INSIDE the image
-  (`docker exec ... node`). All three: d093ea70-8c62-5bd6-9bba-15ab54765bdd. The user _id is read from the probe's own throwaway Mongo.
+  (`docker exec ... node`). All three: d093ea70-8c62-5bd6-9bba-15ab54765bdd. The user \_id is read from the probe's own throwaway Mongo.
 - Check 3: the EXISTING chat's upload carries `conversationId` == that same value.
 
 NOT shown by this probe (named, not hidden): the upload's own `X-Session-Id` header at the BFF. The probe stack logs in with a local email

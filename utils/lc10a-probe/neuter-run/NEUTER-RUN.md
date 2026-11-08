@@ -87,3 +87,16 @@ Result: **27 of 27 cases equal (0 differences)**, including 256 characters, U+00
 | 5   | B-2 digest ignores overrideFiles (composer map only)             | 1 failed, 7 passed, 8 total   | 8 passed, 8 total   | RED->GREEN |
 
 Tests added: `AttachFileChat.spec.tsx` (index reaches AttachFileMenu and AttachFile), `ChatForm.attachments.spec.tsx` (a pane-1 composer uploads under pane 1's seed, through the real ChatForm -> AttachFileChat -> AttachFileMenu -> upload hook chain), `useChatFunctions.newChatSeed.spec.tsx` (same text + changed composer files -> fresh seed; digest follows overrideFiles).
+
+## Round r3 (review r2 B-3): same-size swap cases
+
+Tests added in `useChatFunctions.newChatSeed.spec.tsx`: swapping one composer file for another (f1 to f2) and one `overrideFiles` entry for another (g1 to g2), same text and same count, each takes a fresh seed. The spec now has 10 tests.
+
+| #   | neuter                                                            | neutered                     | restored            | verdict    |
+| --- | ----------------------------------------------------------------- | ---------------------------- | ------------------- | ---------- |
+| 1   | B-3 digest hashes the file COUNT, not the ids (reviewer's neuter) | 2 failed, 8 passed, 10 total | 10 passed, 10 total | RED->GREEN |
+| 2   | B-2 re-run: submissionDigest(text, [])                            | 4 failed, 6 passed, 10 total | 10 passed, 10 total | RED->GREEN |
+| 3   | B-2 re-run: ignore overrideFiles (composer map only)              | 2 failed, 8 passed, 10 total | 10 passed, 10 total | RED->GREEN |
+| 4   | B-3 digest hashes only the first file id                          | 2 failed, 8 passed, 10 total | 10 passed, 10 total | RED->GREEN |
+
+`neuter.py` was rewritten in r3: a context manager restores the original bytes from memory (no backup file), files are opened with `with`, the anchor must match exactly once, and RED means a test FAILED (a syntax or collection error is reported as ERROR, an unchanged pass as NOT-PROVEN). Self-test: a syntax-error neuter reports ERROR (`Tests: 0 total`), an anchor matching 77 times and one matching 0 times are both refused with exit 1 and leave the file untouched.
