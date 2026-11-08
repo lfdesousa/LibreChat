@@ -30,6 +30,48 @@ const { getConfig } = require('./config');
 const { MissingAccessTokenError, SovereignMemoryError } = require('./errors');
 
 /**
+ * The accepted shape of an `X-Session-Id` value (LC-10a R-Q5): printable ASCII without space,
+ * 1 to 255 characters. The memory server enforces the same literal with `re.fullmatch`
+ * (`header_session_id`); this is the origin-side check, so a value the server would reject is
+ * never sent (and a control character never reaches `http.validateHeaderValue`, which would throw
+ * and surface as a 502). JS `$` (no `m` flag) matches only at the very end of the input, so a
+ * trailing line feed fails here exactly as it fails `fullmatch` there.
+ */
+const SESSION_ID_PATTERN = /^[\x21-\x7e]{1,255}$/;
+
+/** An unresolved template placeholder (`{{...}}`) matches the shape but names no chat: every such
+ * request would pool into one compartment. The server rejects it too. */
+const TEMPLATE_MARKERS = ['{{', '}}'];
+
+/**
+ * The header value for `sessionId`, or undefined for no header at all. Only SPACES are stripped
+ * (the server's `strip(" ")`): stripping tabs or line feeds would let `"abc\n"` through as `"abc"`.
+ * Blank means absent, silently; a non-blank value that fails the shape warns with its LENGTH only.
+ *
+ * @param {unknown} sessionId
+ * @returns {string|undefined}
+ */
+function sessionHeaderValue(sessionId) {
+  if (typeof sessionId !== 'string') {
+    return undefined;
+  }
+  const value = sessionId.replace(/^ +| +$/g, '');
+  if (value === '') {
+    return undefined;
+  }
+  if (
+    !SESSION_ID_PATTERN.test(value) ||
+    TEMPLATE_MARKERS.some((marker) => value.includes(marker))
+  ) {
+    logger.warn('[AuditTraceMemory] X-Session-Id value rejected by shape; sending no header', {
+      length: value.length,
+    });
+    return undefined;
+  }
+  return value;
+}
+
+/**
  * @param {object} params
  * @param {string|null|undefined} params.token - the user's Keycloak OIDC
  *   access token. NEVER minted here — the caller reads it off
@@ -43,9 +85,10 @@ const { MissingAccessTokenError, SovereignMemoryError } = require('./errors');
  * @param {string} [params.contentType] - the file's MIME type, if known.
  * @param {string|null|undefined} [params.sessionId] - the chat's conversation
  *   id (LC-10a). Sent as the `X-Session-Id` request header so the BFF can bind
- *   the upload to its chat. Whitespace-stripped; empty / blank / non-string
- *   means NO header at all (never an empty `X-Session-Id:`), mirroring the
- *   memory-server rule (`bff/proxy.py` strip, empty -> no header).
+ *   the upload to its chat. Spaces are stripped; empty / blank / non-string /
+ *   a value outside `SESSION_ID_PATTERN` or holding `{{` / `}}` means NO header
+ *   at all (never an empty `X-Session-Id:`, never a throw), the memory-server
+ *   rule (`header_session_id`) applied at the origin.
  * @returns {Promise<Record<string, unknown>>} the BFF response body,
  *   UNCHANGED (the session-memory key/id WU-5 recall will reference).
  * @throws {MissingAccessTokenError} if `token` is falsy — the BFF is
@@ -73,9 +116,9 @@ async function callConsoleFilesProxy({ token, filePath, filename, contentType, s
     Authorization: `Bearer ${token}`,
     ...formData.getHeaders(),
   };
-  const trimmedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
-  if (trimmedSessionId) {
-    headers['X-Session-Id'] = trimmedSessionId;
+  const sessionHeader = sessionHeaderValue(sessionId);
+  if (sessionHeader !== undefined) {
+    headers['X-Session-Id'] = sessionHeader;
   }
 
   let response;
@@ -108,4 +151,4 @@ async function callConsoleFilesProxy({ token, filePath, filename, contentType, s
   return response.data;
 }
 
-module.exports = { callConsoleFilesProxy };
+module.exports = { callConsoleFilesProxy, SESSION_ID_PATTERN };

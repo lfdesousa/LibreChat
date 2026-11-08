@@ -4,7 +4,8 @@ jest.mock('@librechat/data-schemas', () => ({
 }));
 
 const axios = require('axios');
-const { callConsoleFilesProxy } = require('./consoleFilesClient');
+const { logger } = require('@librechat/data-schemas');
+const { callConsoleFilesProxy, SESSION_ID_PATTERN } = require('./consoleFilesClient');
 const { MissingAccessTokenError, SovereignMemoryError } = require('./errors');
 
 describe('AuditTraceMemory/consoleFilesClient — the BFF POST /console/files HTTP boundary (M3 WU-3)', () => {
@@ -141,6 +142,66 @@ describe('AuditTraceMemory/consoleFilesClient — the BFF POST /console/files HT
     ])('sends NO X-Session-Id header (not even an empty one) for %s', async (_label, value) => {
       const headers = await call(value);
       expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain('x-session-id');
+    });
+  });
+
+  // ── LC-10a AC-23 — the X-Session-Id shape, the SAME reject set as the memory server ──
+  describe('X-Session-Id shape (AC-23): the memory server header_session_id reject set', () => {
+    const call = async (sessionId) => {
+      axios.post.mockResolvedValue({ status: 200, data: { status: 'uploaded' } });
+      const result = await callConsoleFilesProxy({
+        token: 't',
+        filePath: '/tmp/x.txt',
+        filename: 'x.txt',
+        sessionId,
+      });
+      return { headers: axios.post.mock.calls[0][2].headers, result };
+    };
+    const hasHeader = (headers) =>
+      Object.keys(headers).some((key) => key.toLowerCase() === 'x-session-id');
+
+    it('pins the shape literal verbatim', () => {
+      expect(SESSION_ID_PATTERN.source).toBe('^[\\x21-\\x7e]{1,255}$');
+      expect(SESSION_ID_PATTERN.flags).toBe('');
+    });
+
+    it.each([
+      ['256 characters', 'a'.repeat(256), 256],
+      ['U+0000', '\u0000abc', 4],
+      ['a trailing line feed', 'abc\n', 4],
+      ['a leading line feed', '\nabc', 4],
+      ['a CR/LF header injection', 'a\r\nX: 1', 7],
+      ['a tab', 'a\tb', 3],
+      ['U+00FF (not ASCII)', '\u00ff', 1],
+      ['an inner space', 'a b', 3],
+      ['an unresolved template opener {{', 'abc{{def', 8],
+      ['an unresolved template closer }}', 'abc}}def', 8],
+      ['a whole template placeholder', '{{LIBRECHAT_BODY_CONVERSATIONID}}', 33],
+    ])(
+      'rejects %s: no header, no throw, the upload resolves, a length-only warning',
+      async (_label, value, length) => {
+        const { headers, result } = await call(value);
+
+        expect(hasHeader(headers)).toBe(false);
+        expect(result).toEqual({ status: 'uploaded' });
+        expect(logger.warn).toHaveBeenCalledTimes(1);
+        expect(logger.warn).toHaveBeenCalledWith(expect.any(String), { length });
+        expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(value.trim() || '\u0001');
+      },
+    );
+
+    it.each([
+      ['the shortest id', 'a', 'a'],
+      ['255 characters', 'a'.repeat(255), 'a'.repeat(255)],
+      ['a UUID', '0b1c2d3e-0000-4000-8000-000000000000', '0b1c2d3e-0000-4000-8000-000000000000'],
+      ['surrounding spaces stripped', '  s1  ', 's1'],
+      ['single braces are fine', '{a}', '{a}'],
+      ['printable punctuation', '!~:_-.#', '!~:_-.#'],
+    ])('accepts %s: exactly that value, no warning', async (_label, value, sent) => {
+      const { headers } = await call(value);
+
+      expect(headers['X-Session-Id']).toBe(sent);
+      expect(logger.warn).not.toHaveBeenCalled();
     });
   });
 });
