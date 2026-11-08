@@ -26,6 +26,13 @@ export type FilesDraft = {
    * Later rewrites, including another tab restoring the same record, keep this owner rather
    * than restamping. Undefined on records older than the stamp. */
   tabId?: string;
+  /** LC-10a: the new-chat seed (`clientRequestId`) minted at the first attach of an unsent chat.
+   * Only the NEW-chat record (`getNewConversationDraftId`) ever holds one. Owned and cleared by
+   * `newChatSeed.ts`; every writer in this module carries it, and `setFilesDraft` drops it only
+   * when told to (`dropSeed`). */
+  clientRequestId?: string;
+  /** The digest of the submission the seed was first used for (`fnv1a64:<hex>`). */
+  clientRequestDigest?: string;
 };
 
 type StoredPendingTextAttachmentDraft = {
@@ -44,6 +51,8 @@ type StoredFilesDraft = {
   pendingPastes: Record<string, StoredPendingTextAttachmentDraft>;
   pastedTextIds?: string[];
   tabId?: string;
+  clientRequestId?: string;
+  clientRequestDigest?: string;
 };
 
 const newConversationDraftTokens = new Map<number, symbol>();
@@ -409,6 +418,12 @@ export const getFilesDraft = (id: string): FilesDraft => {
       pendingPastes,
       pastedTextIds: Array.isArray(storedDraft.pastedTextIds) ? storedDraft.pastedTextIds : [],
       tabId: typeof storedDraft.tabId === 'string' ? storedDraft.tabId : undefined,
+      clientRequestId:
+        typeof storedDraft.clientRequestId === 'string' ? storedDraft.clientRequestId : undefined,
+      clientRequestDigest:
+        typeof storedDraft.clientRequestDigest === 'string'
+          ? storedDraft.clientRequestDigest
+          : undefined,
     };
   } catch {
     return { fileIds: [], pendingPastes: {} };
@@ -873,7 +888,16 @@ export const addPastedTextDraftFile = ({ id, fileId }: { id: string; fileId: str
   });
 };
 
-export const setFilesDraft = (id: string, draft: FilesDraft): void => {
+export type SetFilesDraftOptions = {
+  /** Drop the seed and its digest instead of carrying them. Only `clearNewChatSeed` sets it. */
+  dropSeed?: boolean;
+};
+
+export const setFilesDraft = (
+  id: string,
+  draft: FilesDraft,
+  { dropSeed = false }: SetFilesDraftOptions = {},
+): void => {
   const key = `${LocalStorageKeys.FILES_DRAFT}${id}`;
   const pendingPasteEntries = Object.entries(draft.pendingPastes);
   /** Stamp only the first writer, and only for as long as that writer is still open. A later
@@ -881,13 +905,26 @@ export const setFilesDraft = (id: string, draft: FilesDraft): void => {
    * Edit / Move back / New Chat from deleting a file the original tab still has attached. Once
    * the owner is gone the claim is worth nothing, so the tab writing now takes it over rather
    * than leaving the record stranded under an id that can never come back. */
-  const claimed = draft.tabId ?? getFilesDraft(id).tabId;
+  const stored = getFilesDraft(id);
+  const claimed = draft.tabId ?? stored.tabId;
   const tabId = (claimed != null && isTabLive(claimed) ? claimed : getBrowserTabId()) || undefined;
+  /** The seed is carried forward: a write that names no seed keeps the stored one, so the
+   * rewrites that rebuild a record from scratch (restore, switch, the files effect) cannot drop
+   * it. A write that names a seed names its digest too; the stored digest belongs to the old seed. */
+  const seed = dropSeed ? undefined : (draft.clientRequestId ?? stored.clientRequestId);
+  let digest: string | undefined;
+  if (seed != null) {
+    digest =
+      draft.clientRequestId != null
+        ? draft.clientRequestDigest
+        : (draft.clientRequestDigest ?? stored.clientRequestDigest);
+  }
   filesDraftCache = null;
   if (
     draft.fileIds.length === 0 &&
     pendingPasteEntries.length === 0 &&
-    (draft.pastedTextIds?.length ?? 0) === 0
+    (draft.pastedTextIds?.length ?? 0) === 0 &&
+    seed == null
   ) {
     removeLocalStorageItem(key);
     return;
@@ -905,6 +942,8 @@ export const setFilesDraft = (id: string, draft: FilesDraft): void => {
               fileIds: draft.fileIds,
               ...(draft.pastedTextIds?.length ? { pastedTextIds: draft.pastedTextIds } : {}),
               ...(tabId ? { tabId } : {}),
+              ...(seed ? { clientRequestId: seed } : {}),
+              ...(digest ? { clientRequestDigest: digest } : {}),
             },
       ),
     );
@@ -945,6 +984,8 @@ export const setFilesDraft = (id: string, draft: FilesDraft): void => {
       pendingPastes,
       ...(draft.pastedTextIds?.length ? { pastedTextIds: draft.pastedTextIds } : {}),
       ...(tabId ? { tabId } : {}),
+      ...(seed ? { clientRequestId: seed } : {}),
+      ...(digest ? { clientRequestDigest: digest } : {}),
     } satisfies StoredFilesDraft),
   );
 };
@@ -1069,9 +1110,19 @@ export const claimComposerDraftTab = (id: string): boolean => {
   /** Nothing but the claim to store. `setFilesDraft` drops an empty record rather than leaving
    * a stub behind, which is right for attachments and wrong for this. */
   filesDraftCache = null;
+  /** A new-chat seed is content, not residue (LC-10a): carry it so stamping the claim does not
+   * drop it. Only a seed this tab may read travels (untagged, or its owner has gone); a live
+   * foreign tab's seed is not ours to adopt, or two tabs would mint under one seed. */
+  const carriedSeed = isFilesDraftOwnedByThisTab(existing) ? existing.clientRequestId : undefined;
+  const carriedDigest = carriedSeed != null ? existing.clientRequestDigest : undefined;
   setLocalStorageItem(
     `${LocalStorageKeys.FILES_DRAFT}${id}`,
-    JSON.stringify({ fileIds: [], tabId }),
+    JSON.stringify({
+      fileIds: [],
+      tabId,
+      ...(carriedSeed ? { clientRequestId: carriedSeed } : {}),
+      ...(carriedDigest ? { clientRequestDigest: carriedDigest } : {}),
+    }),
   );
   return true;
 };
@@ -1084,7 +1135,10 @@ export const releaseComposerDraftTab = (id: string): void => {
   if (
     existing.tabId == null ||
     existing.tabId !== getBrowserTabId() ||
-    hasDraftAttachments(existing)
+    hasDraftAttachments(existing) ||
+    /** The seed is content (LC-10a): a chip-less composer that still holds one keeps its record,
+     * or a reload would lose the seed the in-flight upload and the first send must share. */
+    existing.clientRequestId != null
   ) {
     return;
   }
