@@ -212,6 +212,36 @@ describe('useChatFunctions ask: the new chat seed (LC-10a)', () => {
     expect(peekNewChatSeed(0)).toBe(resent);
   });
 
+  it('AC-22(h1) swapping one composer file for another (same count, same text) takes a fresh seed', () => {
+    const uploadSeed = mintNewChatSeed(0);
+    const composerFiles = fileMap('f1');
+    const { submit } = renderNewChat(composerFiles);
+
+    expect(submit('hello')).toBe(uploadSeed);
+    composerFiles.clear();
+    composerFiles.set('f2', { file_id: 'f2' } as ExtendedFile);
+    const resent = submit('hello');
+
+    expect(resent).not.toBe(uploadSeed);
+    expect(resent).toMatch(UUID_V4);
+    expect(peekNewChatSeed(0)).toBe(resent);
+  });
+
+  it('AC-22(h1) swapping one overrideFiles entry for another (same count) takes a fresh seed', () => {
+    const uploadSeed = mintNewChatSeed(0);
+    const { submit } = renderNewChat(fileMap('c1'));
+    const withOverride = (...ids: string[]) => ({
+      overrideFiles: ids.map((file_id) => ({ file_id })) as never,
+    });
+
+    expect(submit('hello', withOverride('g1'))).toBe(uploadSeed);
+    const resent = submit('hello', withOverride('g2'));
+
+    expect(resent).not.toBe(uploadSeed);
+    expect(resent).toMatch(UUID_V4);
+    expect(peekNewChatSeed(0)).toBe(resent);
+  });
+
   it('AC-22(h) the digest follows overrideFiles when given, not the composer map', () => {
     const uploadSeed = mintNewChatSeed(0);
     const composerFiles = fileMap('c1');
