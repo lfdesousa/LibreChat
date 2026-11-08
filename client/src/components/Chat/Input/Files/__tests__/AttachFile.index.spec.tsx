@@ -1,7 +1,7 @@
 import React from 'react';
 import { render } from '@testing-library/react';
-import AttachFile from '../AttachFile';
 import FileFormChat from '../FileFormChat';
+import AttachFile from '../AttachFile';
 
 const mockUseFileHandlingNoChatContext = jest.fn((_params?: unknown, _state?: unknown) => ({
   handleFileChange: jest.fn(),

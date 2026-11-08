@@ -12,8 +12,8 @@ import { QueryKeys, FileSources, EModelEndpoint } from 'librechat-data-provider'
 import type { TFile, TFileUpload, TConversation } from 'librechat-data-provider';
 import type { ChatFormValues } from '~/common';
 import { ChatContext, ChatFormProvider } from '~/Providers';
-import { AuthContextProvider } from '~/hooks/AuthContext';
 import { clearNewChatSeed, mintNewChatSeed } from '~/utils';
+import { AuthContextProvider } from '~/hooks/AuthContext';
 import ChatForm from '../ChatForm';
 import store from '~/store';
 
