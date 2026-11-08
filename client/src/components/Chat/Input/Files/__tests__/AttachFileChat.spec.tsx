@@ -47,15 +47,22 @@ jest.mock('../AttachFileMenu', () => {
   };
 });
 
+/** Capture the props passed to AttachFile */
+let mockAttachFileProps: Record<string, unknown> = {};
 jest.mock('../AttachFile', () => {
-  return function MockAttachFile() {
+  return function MockAttachFile(props: Record<string, unknown>) {
+    mockAttachFileProps = props;
     return <div data-testid="attach-file" />;
   };
 });
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
-function renderComponent(conversation: Record<string, unknown> | null, disableInputs = false) {
+function renderComponent(
+  conversation: Record<string, unknown> | null,
+  disableInputs = false,
+  index = 0,
+) {
   return render(
     <QueryClientProvider client={queryClient}>
       <RecoilRoot>
@@ -65,7 +72,7 @@ function renderComponent(conversation: Record<string, unknown> | null, disableIn
           files={new Map()}
           setFiles={() => {}}
           setFilesLoading={() => {}}
-          index={0}
+          index={index}
         />
       </RecoilRoot>
     </QueryClientProvider>,
@@ -280,6 +287,18 @@ describe('AttachFileChat', () => {
       renderComponent({ endpoint: EModelEndpoint.agents });
       const config = mockAttachFileMenuProps.endpointFileConfig as { fileLimit?: number };
       expect(config?.fileLimit).toBe(20);
+    });
+  });
+
+  describe('composer pane (LC-10a, S3)', () => {
+    it('hands its pane index to AttachFileMenu (agents endpoint)', () => {
+      renderComponent({ endpoint: EModelEndpoint.agents }, false, 1);
+      expect(mockAttachFileMenuProps.index).toBe(1);
+    });
+
+    it('hands its pane index to AttachFile (assistants endpoint)', () => {
+      renderComponent({ endpoint: EModelEndpoint.assistants }, false, 1);
+      expect(mockAttachFileProps.index).toBe(1);
     });
   });
 });

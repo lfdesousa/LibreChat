@@ -197,6 +197,38 @@ describe('useChatFunctions ask: the new chat seed (LC-10a)', () => {
     expect(JSON.stringify(mockLoggerWarn.mock.calls)).not.toContain('secret plan');
   });
 
+  it('AC-22(h1) the same text with a CHANGED composer file set takes a fresh seed', () => {
+    const uploadSeed = mintNewChatSeed(0);
+    const composerFiles = fileMap('f1');
+    const { submit } = renderNewChat(composerFiles);
+
+    expect(submit('hello')).toBe(uploadSeed);
+    /** The failed first submit left the chips; the user attaches one more and resends. */
+    composerFiles.set('f2', { file_id: 'f2' } as ExtendedFile);
+    const resent = submit('hello');
+
+    expect(resent).not.toBe(uploadSeed);
+    expect(resent).toMatch(UUID_V4);
+    expect(peekNewChatSeed(0)).toBe(resent);
+  });
+
+  it('AC-22(h) the digest follows overrideFiles when given, not the composer map', () => {
+    const uploadSeed = mintNewChatSeed(0);
+    const composerFiles = fileMap('c1');
+    const { submit } = renderNewChat(composerFiles);
+    const withOverride = (...ids: string[]) => ({
+      overrideFiles: ids.map((file_id) => ({ file_id })) as never,
+    });
+
+    expect(submit('hello', withOverride('g1'))).toBe(uploadSeed);
+    /** The composer map changes but the submission's files do not: an identical resend. */
+    composerFiles.clear();
+    composerFiles.set('c2', { file_id: 'c2' } as ExtendedFile);
+    expect(submit('hello', withOverride('g1'))).toBe(uploadSeed);
+    /** The composer map is the same as before but overrideFiles changed: an edited resend. */
+    expect(submit('hello', withOverride('g1', 'g2'))).not.toBe(uploadSeed);
+  });
+
   it('AC-22(d) an explicit override (queued, steered, recovered) wins and leaves the seed alone', () => {
     const uploadSeed = mintNewChatSeed(0);
     const { submit } = renderNewChat(fileMap('f1'));
