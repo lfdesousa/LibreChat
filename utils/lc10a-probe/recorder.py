@@ -8,7 +8,8 @@
               `x-session-id` ONLY; answers a minimal OpenAI-style reply.
 
 Redaction happens at capture time: Authorization / Cookie / any token value is
-never read into a record. Values recorded: conversationId, x-session-id.
+never read into a record. Values recorded: conversationId, clientRequestId (the
+new-chat seed, a client-minted UUID; AC-P2b), x-session-id.
 """
 import email
 import email.policy
@@ -38,13 +39,15 @@ def multipart_fields(content_type, body):
         b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body,
         policy=email.policy.HTTP,
     )
-    names, conv = [], None
+    names, conv, seed = [], None, None
     for part in msg.iter_parts():
         name = part.get_param("name", header="content-disposition")
         names.append(name)
         if name == "conversationId":
             conv = part.get_content().strip()
-    return names, conv
+        elif name == "clientRequestId":
+            seed = part.get_content().strip()
+    return names, conv, seed
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -84,11 +87,13 @@ class Handler(BaseHTTPRequestHandler):
     def _api(self, path, body):
         ctype = self.headers.get("Content-Type", "")
         if self.command == "POST" and path.startswith("/api/files") and ctype.startswith("multipart/"):
-            names, conv = multipart_fields(ctype, body)
+            names, conv, seed = multipart_fields(ctype, body)
             record({"mode": "api-inbound", "method": self.command, "path": path,
                     "multipart_field_names": names,
                     "conversationId_present": conv is not None,
-                    "conversationId": conv})
+                    "conversationId": conv,
+                    "clientRequestId_present": seed is not None,
+                    "clientRequestId": seed})
         host, port = UPSTREAM.split(":")
         conn = http.client.HTTPConnection(host, int(port), timeout=300)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in _HOP}
