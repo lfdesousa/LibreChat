@@ -1,5 +1,6 @@
 import React, { useState, useMemo, memo } from 'react';
 import { useRecoilState } from 'recoil';
+import { FileSearch } from 'lucide-react';
 import {
   Button,
   EditIcon,
@@ -12,6 +13,7 @@ import {
 import type { TConversation, TMessage, TFeedback } from 'librechat-data-provider';
 import { useGenerationsByLatest, useLocalize } from '~/hooks';
 import { Fork } from '~/components/Conversations';
+import { EvidenceDialog } from './Evidence';
 import { hoverButtonClasses } from './styles';
 import MessageAudio from './MessageAudio';
 import Feedback from './Feedback';
@@ -134,6 +136,7 @@ const HoverButtons = ({
 }: THoverButtons) => {
   const localize = useLocalize();
   const [isCopied, setIsCopied] = useState(false);
+  const [isEvidenceOpen, setIsEvidenceOpen] = useState(false);
   const [TextToSpeech] = useRecoilState<boolean>(store.textToSpeech);
 
   const endpoint = useMemo(() => {
@@ -254,6 +257,25 @@ const HoverButtons = ({
       {/* Feedback Buttons */}
       {!error && !isActiveStreamingMessage && !isCreatedByUser && handleFeedback != null && (
         <Feedback handleFeedback={handleFeedback} feedback={message.feedback} isLast={isLast} />
+      )}
+
+      {/* Reconstruct this answer (CONSOLE-AUDIT-EVIDENCE): assistant answers only, never mid-stream */}
+      {!error && !isActiveStreamingMessage && !isCreatedByUser && (
+        <>
+          <HoverButton
+            onClick={() => setIsEvidenceOpen(true)}
+            title={localize('com_evidence_button')}
+            icon={<FileSearch size="19" />}
+            isLast={isLast}
+          />
+          {isEvidenceOpen && (
+            <EvidenceDialog
+              open={isEvidenceOpen}
+              messageId={message.messageId}
+              onOpenChange={setIsEvidenceOpen}
+            />
+          )}
+        </>
       )}
 
       {/* Regenerate Button */}
