@@ -63,7 +63,8 @@ async function callMemoryProxy({ method, path, token, query, body }) {
     });
   } catch (error) {
     logger.error('[AuditTraceMemory] BFF /memory unreachable', error);
-    throw new SovereignMemoryError(`sovereign memory service unreachable: ${error.message}`, 502);
+    // The transport error names the BFF host and port: it stays in the log above, not the response.
+    throw new SovereignMemoryError('sovereign memory service unreachable', 502);
   }
 
   if (response.status >= 400) {

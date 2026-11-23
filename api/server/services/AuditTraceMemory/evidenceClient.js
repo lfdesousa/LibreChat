@@ -78,7 +78,9 @@ async function callEvidenceProxy({ kind, id, token }) {
     });
   } catch (error) {
     logger.error('[AuditTraceMemory] BFF /console/evidence unreachable', error);
-    throw new SovereignMemoryError(`evidence service unreachable: ${error.message}`, 502);
+    // The transport error names the BFF host and port: it stays in the server-side log above and
+    // never reaches the browser.
+    throw new SovereignMemoryError('evidence service unreachable', 502);
   }
 
   if (response.status >= 400) {

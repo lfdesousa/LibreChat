@@ -36,6 +36,12 @@ const V3 = 'console-audit-evidence.fixture.v3.json';
 const V3_IMAGE = 'console-audit-evidence.fixture.v3-image.json';
 
 const TOKEN = 'session-access-token';
+/** What the browser itself sends on every API call: LibreChat's own app JWT and its cookies. */
+const HOSTILE_BROWSER = {
+  Authorization: 'Bearer browser-app-jwt',
+  Cookie: 'refreshToken=hostile-refresh; connect.sid=hostile-session',
+};
+const withBrowserCredentials = (req) => req.set(HOSTILE_BROWSER);
 const BFF = 'http://bff.test:8766';
 
 const buildApp = ({ accessToken = TOKEN } = {}) => {
@@ -101,16 +107,16 @@ describe('audittraceEvidence route', () => {
 
   describe('G16 — fail closed without a token', () => {
     it('answers 401 and never contacts the BFF when the session has no access token', async () => {
-      const response = await request(buildApp({ accessToken: null })).get(
-        '/api/audittrace/evidence/messages/abc',
+      const response = await withBrowserCredentials(
+        request(buildApp({ accessToken: null })).get('/api/audittrace/evidence/messages/abc'),
       );
       expect(response.status).toBe(401);
       expect(mockAxiosRequest).not.toHaveBeenCalled();
     });
 
     it('does the same for the interaction route', async () => {
-      const response = await request(buildApp({ accessToken: null })).get(
-        '/api/audittrace/evidence/interactions/12',
+      const response = await withBrowserCredentials(
+        request(buildApp({ accessToken: null })).get('/api/audittrace/evidence/interactions/12'),
       );
       expect(response.status).toBe(401);
       expect(mockAxiosRequest).not.toHaveBeenCalled();
@@ -120,8 +126,10 @@ describe('audittraceEvidence route', () => {
   describe('the data path is the BFF evidence route, GET only, with the caller own token', () => {
     it('GETs /console/evidence/messages/<id> with exactly the Authorization header', async () => {
       mockAxiosRequest.mockResolvedValue({ status: 200, data: JSON.parse(readFixture(V3)) });
-      const response = await request(buildApp()).get(
-        '/api/audittrace/evidence/messages/00000000-0000-4000-8000-00000000000b',
+      const response = await withBrowserCredentials(
+        request(buildApp()).get(
+          '/api/audittrace/evidence/messages/00000000-0000-4000-8000-00000000000b',
+        ),
       );
       expect(response.status).toBe(200);
       expect(mockAxiosRequest).toHaveBeenCalledTimes(1);
@@ -186,6 +194,17 @@ describe('audittraceEvidence route', () => {
       const response = await request(buildApp()).get('/api/audittrace/evidence/messages/abc');
       expect(response.status).toBe(502);
     });
+
+    it('returns a generic message that names no host, port or transport text, and logs the detail', async () => {
+      const { logger } = require('@librechat/data-schemas');
+      const transport = new Error('connect ECONNREFUSED 10.1.2.3:8766');
+      mockAxiosRequest.mockRejectedValue(transport);
+      const response = await request(buildApp()).get('/api/audittrace/evidence/messages/abc');
+      expect(response.status).toBe(502);
+      expect(response.body).toEqual({ error: 'evidence service unreachable' });
+      expect(JSON.stringify(response.body)).not.toMatch(/10\.1\.2\.3|8766|ECONNREFUSED/);
+      expect(logger.error).toHaveBeenCalledWith(expect.any(String), transport);
+    });
   });
 
   describe('G20c — path confinement: a bad id never reaches the BFF', () => {
@@ -247,4 +266,23 @@ describe('the route is mounted in both server entry points', () => {
     expect(source).toContain("const audittraceEvidence = require('./audittraceEvidence');");
     expect(source).toMatch(/module\.exports = \{[\s\S]*\n {2}audittraceEvidence,/);
   });
+});
+
+describe('callEvidenceProxy refuses a kind it does not know (no BFF call)', () => {
+  const {
+    callEvidenceProxy,
+    InvalidEvidenceIdError,
+  } = require('~/server/services/AuditTraceMemory/evidenceClient');
+
+  beforeEach(() => mockAxiosRequest.mockReset());
+
+  it.each(['../x', '', 'users', 'constructor', 'toString', '__proto__', undefined, null])(
+    'rejects kind %p with a 400',
+    async (kind) => {
+      await expect(callEvidenceProxy({ kind, id: 'abc', token: TOKEN })).rejects.toBeInstanceOf(
+        InvalidEvidenceIdError,
+      );
+      expect(mockAxiosRequest).not.toHaveBeenCalled();
+    },
+  );
 });

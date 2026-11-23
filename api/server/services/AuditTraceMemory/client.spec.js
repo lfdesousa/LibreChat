@@ -81,6 +81,15 @@ describe('AuditTraceMemory/client — the BFF /memory/* HTTP boundary', () => {
     });
   });
 
+  it('keeps the transport detail (host, port) out of the error the route returns', async () => {
+    axios.request.mockRejectedValue(new Error('connect ECONNREFUSED 10.1.2.3:8766'));
+    const error = await callMemoryProxy({ method: 'GET', path: 'episodic', token: 't' }).catch(
+      (e) => e,
+    );
+    expect(error.status).toBe(502);
+    expect(error.message).toBe('sovereign memory service unreachable');
+  });
+
   it('every thrown error is a SovereignMemoryError so callers can branch on `.status` alone', async () => {
     axios.request.mockRejectedValue(new Error('boom'));
     await expect(
