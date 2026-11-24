@@ -1,5 +1,5 @@
-import { useLocalize } from '~/hooks';
 import type { TEvidenceV1 } from '~/data-provider/Evidence';
+import { useLocalize } from '~/hooks';
 
 /**
  * The "Sources" tab. `not_recorded` is shown verbatim with its meaning: an empty list that reads as

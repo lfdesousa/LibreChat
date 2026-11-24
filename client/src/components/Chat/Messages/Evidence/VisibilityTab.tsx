@@ -1,6 +1,6 @@
-import { useLocalize } from '~/hooks';
 import type { TEvidenceV1 } from '~/data-provider/Evidence';
 import { serviceReaderLines } from './evidenceModel';
+import { useLocalize } from '~/hooks';
 
 /**
  * The "Who can see this" tab. It reports the mechanism the payload names and speaks about THIS

@@ -1,6 +1,6 @@
-import { useLocalize } from '~/hooks';
 import type { TEvidenceV1 } from '~/data-provider/Evidence';
 import { imageItems, integrityLabelKey } from './evidenceModel';
+import { useLocalize } from '~/hooks';
 
 function Row({ label, value }: { label: string; value: string | number }) {
   return (

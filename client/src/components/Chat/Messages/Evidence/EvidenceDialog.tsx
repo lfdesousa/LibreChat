@@ -9,10 +9,10 @@ import {
   OGDialogDescription,
 } from '@librechat/client';
 import { useEvidenceQuery } from '~/data-provider/Evidence';
-import { useLocalize } from '~/hooks';
 import { errorMessageKey } from './evidenceModel';
 import ReconstructTab from './ReconstructTab';
 import VisibilityTab from './VisibilityTab';
+import { useLocalize } from '~/hooks';
 import SourcesTab from './SourcesTab';
 
 type EvidenceDialogProps = {

@@ -1,5 +1,5 @@
-import type { TranslationKeys } from '~/hooks';
 import type { TEvidenceServiceReader, TEvidenceV1 } from '~/data-provider/Evidence';
+import type { TranslationKeys } from '~/hooks';
 
 /** The service role name the orchestrator serves when the chart cannot name the real reader. */
 const OPERATOR_MANAGED = 'operator-managed';

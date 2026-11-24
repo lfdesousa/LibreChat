@@ -1,9 +1,9 @@
 import React from 'react';
 import userEvent from '@testing-library/user-event';
 import { render, screen, within } from '@testing-library/react';
+import { evidenceV3, evidenceV3Image } from 'test/evidenceFixtures';
 import { initializeI18n } from '~/locales/i18n';
 import EvidenceDialog from '../EvidenceDialog';
-import { evidenceV3, evidenceV3Image } from 'test/evidenceFixtures';
 
 /**
  * G17 — every rendered value comes from the frozen fixtures (v3, v3-image); the integrity wording
