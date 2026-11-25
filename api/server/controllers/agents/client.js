@@ -175,6 +175,10 @@ const {
   resolveMemoryMethods,
 } = require('~/server/services/AuditTraceMemory/agentMethods');
 
+const {
+  getRequestTokenSource,
+} = require('~/server/services/AuditTraceConversations/requestContext');
+
 const loadAgent = (params) => loadAgentFn(params, { getAgent: db.getAgent, getMCPServerTools });
 
 const MEMORY_INPUT_CHARS_PER_TOKEN = 8;
@@ -4186,6 +4190,7 @@ class AgentClient extends BaseClient {
           customHandlers: reasoningLabel?.handlers(activityHandlers) ?? activityHandlers,
           requestBody: config.configurable.requestBody,
           user: createSafeUser(this.options.req?.user),
+          tokenSource: getRequestTokenSource(),
           tenantId: this.options.req?.user?.tenantId,
           summarizationConfig: appConfig?.summarization,
           appConfig,
@@ -4694,6 +4699,7 @@ class AgentClient extends BaseClient {
         customHandlers: reasoningLabel?.handlers(activityHandlers) ?? activityHandlers,
         requestBody: config.configurable.requestBody,
         user: createSafeUser(this.options.req?.user),
+        tokenSource: getRequestTokenSource(),
         tenantId: this.options.req?.user?.tenantId,
         summarizationConfig: appConfig?.summarization,
         appConfig,
@@ -5050,6 +5056,7 @@ class AgentClient extends BaseClient {
         conversationId: this.conversationId,
         parentMessageId: this.parentMessageId,
       },
+      tokenSource: getRequestTokenSource(),
     });
 
     try {

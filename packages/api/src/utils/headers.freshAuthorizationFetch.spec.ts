@@ -80,7 +80,7 @@ describe('CONSOLE-LONG-TURN-TOKEN-REFRESH ADDENDUM-2 — per-request Authorizati
     }
     expect(tokenSource.current).toHaveBeenCalledTimes(1);
     expect(
-      new Headers((inner.mock.calls[0] as unknown[])[1] as RequestInit['headers']).get(
+      new Headers(((inner.mock.calls[0] as unknown[])[1] as RequestInit).headers).get(
         'authorization',
       ),
     ).toBe(`Bearer ${fresh}`);
@@ -183,8 +183,81 @@ describe('CONSOLE-LONG-TURN-TOKEN-REFRESH ADDENDUM-2 — per-request Authorizati
     } finally {
       globalThis.fetch = saved;
     }
-    const headers = new Headers((inner.mock.calls[0] as unknown[])[1] as RequestInit['headers']);
+    const headers = new Headers(((inner.mock.calls[0] as unknown[])[1] as RequestInit).headers);
     expect(headers.get('x-token')).toBe(`Token ${fresh}`);
     expect(headers.get('authorization')).toBe('Bearer sk-endpoint-key');
+  });
+
+  it('R19e — resolving the same configuration twice neither loses the templates nor wraps the fetch twice (A5)', async () => {
+    const tokenSource = { current: jest.fn(async () => fresh) };
+    const existing = jest.fn(async () => ({ ok: true }));
+    const llmConfig = mk(
+      { Authorization: `Bearer ${PLACEHOLDER}` },
+      existing as unknown as Cfg['fetch'],
+    );
+    resolveConfigHeaders({ llmConfig, user, body: {}, tokenSource } as never);
+    const wrapped = llmConfig.configuration.fetch;
+    resolveConfigHeaders({ llmConfig, user, body: {}, tokenSource } as never);
+    expect(llmConfig.configuration.fetch).toBe(wrapped);
+    await llmConfig.configuration.fetch!('https://bff.test/v1/chat/completions', {
+      method: 'POST',
+      headers: new Headers({ Authorization: `Bearer ${stale}` }),
+    });
+    expect(existing).toHaveBeenCalledTimes(1);
+    expect(tokenSource.current).toHaveBeenCalledTimes(1);
+    const passed = (existing.mock.calls[0] as unknown[])[1] as RequestInit;
+    expect(new Headers(passed.headers).get('authorization')).toBe(`Bearer ${fresh}`);
+  });
+
+  it('R19f — a first resolution without a token source keeps the templates for a later call that has one (A5)', async () => {
+    const tokenSource = { current: jest.fn(async () => fresh) };
+    const llmConfig = mk({ Authorization: `Bearer ${PLACEHOLDER}` });
+    resolveConfigHeaders({ llmConfig, user, body: {} } as never);
+    expect(llmConfig.configuration.fetch).toBeUndefined();
+    resolveConfigHeaders({ llmConfig, user, body: {}, tokenSource } as never);
+    expect(typeof llmConfig.configuration.fetch).toBe('function');
+  });
+
+  it('R19g — a header template that also carries another placeholder keeps it resolved, and only the token part is refreshed', async () => {
+    const tokenSource = { current: jest.fn(async () => fresh) };
+    const llmConfig = mk({ 'X-Mixed': `${PLACEHOLDER};conv={{LIBRECHAT_BODY_CONVERSATIONID}}` });
+    const inner = jest.fn(async () => ({ ok: true }));
+    const saved = globalThis.fetch;
+    globalThis.fetch = inner as unknown as typeof fetch;
+    try {
+      resolveConfigHeaders({
+        llmConfig,
+        user,
+        body: { conversationId: 'c9' },
+        tokenSource,
+      } as never);
+      await llmConfig.configuration.fetch!('https://bff.test/v1/chat/completions', {
+        method: 'POST',
+        headers: new Headers(),
+      });
+    } finally {
+      globalThis.fetch = saved;
+    }
+    const passed = (inner.mock.calls[0] as unknown[])[1] as RequestInit;
+    expect(new Headers(passed.headers).get('x-mixed')).toBe(`${fresh};conv=c9`);
+  });
+
+  it('R19h — a source that yields no token leaves the request headers as the SDK built them', async () => {
+    const tokenSource = { current: jest.fn(async () => undefined) };
+    const llmConfig = mk({ Authorization: `Bearer ${PLACEHOLDER}` });
+    const inner = jest.fn(async () => ({ ok: true }));
+    const saved = globalThis.fetch;
+    globalThis.fetch = inner as unknown as typeof fetch;
+    try {
+      resolveConfigHeaders({ llmConfig, user, body: {}, tokenSource } as never);
+      await llmConfig.configuration.fetch!('https://bff.test/v1/chat/completions', {
+        method: 'POST',
+        headers: new Headers({ Authorization: 'Bearer from-the-sdk' }),
+      });
+    } finally {
+      globalThis.fetch = saved;
+    }
+    const passed = (inner.mock.calls[0] as unknown[])[1] as RequestInit;
+    expect(new Headers(passed.headers).get('authorization')).toBe('Bearer from-the-sdk');
   });
 });

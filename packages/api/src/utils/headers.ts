@@ -80,6 +80,36 @@ export function mergeHeaders(
 
 type DefaultHeadersContainer = { defaultHeaders?: Record<string, string> };
 
+/** An OpenAI-SDK-shaped fetch: the SDK calls `configuration.fetch` once per HTTP attempt (retries included). */
+type ConfigurationFetch = (input: unknown, init?: RequestInit) => Promise<unknown>;
+type FetchContainer = DefaultHeadersContainer & { fetch?: ConfigurationFetch };
+
+/**
+ * A source of an access token that is fresh NOW: awaited once per outbound request, so a run
+ * that outlives one token's lifetime keeps sending a valid one.
+ */
+export interface AccessTokenSource {
+  current: () => Promise<string | undefined>;
+}
+
+const OPENID_ACCESS_TOKEN_PLACEHOLDERS = [
+  '{{LIBRECHAT_OPENID_ACCESS_TOKEN}}',
+  '{{LIBRECHAT_OPENID_TOKEN}}',
+] as const;
+/** Stands for the token inside a header template that has every OTHER placeholder resolved. */
+const FRESH_TOKEN_SENTINEL = '__librechat_fresh_bearer__';
+
+type RefreshableHeader = { key: string; resolvedTemplate: string };
+
+/**
+ * The refreshable headers of each resolved header map, recorded from the ORIGINAL templates
+ * before resolution replaced them: `resolveOnce` is idempotent, so a second call on the same
+ * configuration sees only resolved values and must neither lose these nor wrap the fetch twice.
+ */
+const refreshableHeadersByMap = new WeakMap<object, RefreshableHeader[]>();
+/** Configurations whose `fetch` already carries the per-request bearer. */
+const bearerFetchInstalled = new WeakSet<object>();
+
 /**
  * Header maps already resolved by `resolveConfigHeaders`. `resolveConfigHeaders`
  * mutates config objects in place, and the same initialized agent (hence the same
@@ -91,6 +121,73 @@ type DefaultHeadersContainer = { defaultHeaders?: Record<string, string> };
  * nothing carries across requests.
  */
 const resolvedHeaderMaps = new WeakSet<object>();
+
+/**
+ * For every header whose ORIGINAL value carries an OpenID access-token placeholder, the template
+ * with every other placeholder resolved and the token left as a sentinel.
+ */
+function recordRefreshableHeaders(
+  headers: Record<string, string>,
+  context: {
+    user?: Partial<IUser> | { id: string };
+    body?: RequestBody;
+    customUserVars?: Record<string, string>;
+  },
+): RefreshableHeader[] {
+  const refreshable: RefreshableHeader[] = [];
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value !== 'string') {
+      continue;
+    }
+    const carriesToken = OPENID_ACCESS_TOKEN_PLACEHOLDERS.some((p) => value.includes(p));
+    if (!carriesToken) {
+      continue;
+    }
+    const withSentinel = OPENID_ACCESS_TOKEN_PLACEHOLDERS.reduce(
+      (acc, placeholder) => acc.split(placeholder).join(FRESH_TOKEN_SENTINEL),
+      value,
+    );
+    const resolved = resolveHeaders({
+      headers: { [key]: withSentinel },
+      ...context,
+      stripUnresolved: true,
+    });
+    refreshable.push({ key, resolvedTemplate: resolved[key] ?? withSentinel });
+  }
+  return refreshable;
+}
+
+/**
+ * Composes `configuration.fetch` (the OpenAI SDK calls it for every attempt, streaming and
+ * retries included) so each outbound request carries a token that is fresh now in exactly the
+ * headers that carried the placeholder, each with its own prefix. The existing fetch (the
+ * SSRF-protected one) stays the one that is called with the init otherwise unchanged; nothing is
+ * installed without a placeholder-carrying header, a source, or twice for one configuration.
+ */
+function installFreshBearerFetch(
+  configuration: FetchContainer,
+  tokenSource: AccessTokenSource | undefined,
+): void {
+  const refreshable =
+    (configuration.defaultHeaders && refreshableHeadersByMap.get(configuration.defaultHeaders)) ??
+    [];
+  if (!tokenSource || refreshable.length === 0 || bearerFetchInstalled.has(configuration)) {
+    return;
+  }
+  const existing = configuration.fetch;
+  configuration.fetch = async (input, init) => {
+    const token = await tokenSource.current();
+    const headers = new Headers(init?.headers);
+    if (token) {
+      for (const { key, resolvedTemplate } of refreshable) {
+        headers.set(key, resolvedTemplate.split(FRESH_TOKEN_SENTINEL).join(token));
+      }
+    }
+    const inner = existing ?? (globalThis.fetch as unknown as ConfigurationFetch);
+    return inner(input, { ...init, headers });
+  };
+  bearerFetchInstalled.add(configuration);
+}
 
 /**
  * Resolves placeholder templates in the outbound request headers of a built LLM
@@ -116,6 +213,7 @@ export function resolveConfigHeaders({
   user,
   body,
   customUserVars,
+  tokenSource,
 }: {
   /** Partial: this only reads the three provider header carriers, so
    *  callers with a bare ClientOptions (e.g. auxiliary generations like
@@ -125,6 +223,11 @@ export function resolveConfigHeaders({
   user?: Partial<IUser> | { id: string };
   body?: RequestBody;
   customUserVars?: Record<string, string>;
+  /**
+   * When given, a header that carried an OpenID access-token placeholder is re-resolved on EVERY
+   * outbound request with a token that is fresh now (see `installFreshBearerFetch`).
+   */
+  tokenSource?: AccessTokenSource;
 }): void {
   if (llmConfig == null) {
     return;
@@ -134,14 +237,17 @@ export function resolveConfigHeaders({
     if (resolvedHeaderMaps.has(headers)) {
       return headers;
     }
+    const refreshable = recordRefreshableHeaders(headers, { user, body, customUserVars });
     const resolved = resolveHeaders({ headers, user, body, customUserVars, stripUnresolved: true });
     resolvedHeaderMaps.add(resolved);
+    refreshableHeadersByMap.set(resolved, refreshable);
     return resolved;
   };
 
-  const configuration = llmConfig.configuration as DefaultHeadersContainer | undefined;
+  const configuration = llmConfig.configuration as FetchContainer | undefined;
   if (configuration?.defaultHeaders != null) {
     configuration.defaultHeaders = resolveOnce(configuration.defaultHeaders);
+    installFreshBearerFetch(configuration, tokenSource);
   }
 
   const clientOptions = (llmConfig as AnthropicClientOptions).clientOptions as
