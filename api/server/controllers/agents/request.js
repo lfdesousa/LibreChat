@@ -46,6 +46,11 @@ const {
 } = require('@librechat/api');
 const { disposeClient } = require('~/server/cleanup');
 const {
+  handleSovereignTerminalFailure,
+  isSovereignSessionFailure,
+  messageForSovereignFailure,
+} = require('~/server/services/AuditTraceAuth');
+const {
   getMCPRequestContext,
   cleanupMCPRequestContextForReq,
 } = require('~/server/services/MCPRequestContext');
@@ -2795,6 +2800,14 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
         let legacyEventActorErrorHistoryDurable = false;
         if (terminalClaim && !terminalClaimFinished) {
           ownsScheduledFailure = true;
+          /** A named sign-in failure (token refresh hit a hard limit) is shown to the user BEFORE the
+           * reconciliation closes the stream; the partial checkpoint and the audit record stay as they are. */
+          const sessionFailureSurfaced = await handleSovereignTerminalFailure({
+            error,
+            streamId,
+            jobCreatedAt,
+            manager: GenerationJobManager,
+          });
           try {
             await GenerationJobManager.publishTerminalClaim(terminalClaim, null);
           } catch (publishError) {
@@ -2810,10 +2823,12 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
               );
             });
           }
-          logger.error(
-            `[ResumableAgentController] Terminal persistence failed for ${streamId}:`,
-            error,
-          );
+          if (!sessionFailureSurfaced) {
+            logger.error(
+              `[ResumableAgentController] Terminal persistence failed for ${streamId}:`,
+              error,
+            );
+          }
           startupTelemetry?.end('error', error);
         } else if (pausePersistenceFailed) {
           ownsScheduledFailure = pausePersistenceFailureFinalized;
@@ -2832,7 +2847,9 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
           // abortJob already handled emitDone and completeJob
         } else {
           logger.error(`[ResumableAgentController] Generation error for ${streamId}:`, error);
-          const generationError = error.message || 'Generation failed';
+          const generationError = isSovereignSessionFailure(error)
+            ? `${messageForSovereignFailure(error.code).text} (${error.code})`
+            : error.message || 'Generation failed';
           try {
             // completeJob first wins running -> error and atomically parks
             // steers, then publishes. A competing abort/pause emits nothing.
