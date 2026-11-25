@@ -62,7 +62,10 @@ const jwt = require('jsonwebtoken');
 const openIdClient = require('openid-client');
 const { findOpenIDUser } = require('@librechat/api');
 const { configureTokenSource, getTokenSource } = require('~/server/services/AuditTraceAuth');
-const { storeOpenIDSession } = require('~/server/services/AuthService');
+const {
+  storeOpenIDSession,
+  deleteOpenIDSessionDocument,
+} = require('~/server/services/AuthService');
 const { refreshController } = require('./AuthController');
 
 const T0_MS = Date.UTC(2026, 10, 25, 13, 41, 55);
@@ -166,4 +169,13 @@ describe('Session documents after mid-turn rotations (A2, review r1 F1)', () => 
       expect([...mockDocs].sort()).toEqual(['rt-0', `rt-${k}`]);
     },
   );
+
+  it('an ordinary browser refresh (no mid-turn rotation; the cookie names the presented token): the store deletes it, nothing is deleted twice', async () => {
+    advance(280);
+    const res = mockRes();
+    await refreshController(request(), res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect([...mockDocs]).toEqual(['rt-1']);
+    expect(deleteOpenIDSessionDocument).not.toHaveBeenCalled();
+  });
 });
