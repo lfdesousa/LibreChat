@@ -25,8 +25,16 @@ const run = async (req) => {
 
 describe('optionalShareFileAuth', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    /** `clearMocks` only clears calls: a `mockReturnValue` / `mockResolvedValue` set by one test would
+     *  otherwise leak into the next one under any other test order. Reset implementations, then re-arm
+     *  the one the middleware needs in every test. */
+    jest.resetAllMocks();
+    mockRunAsSystem.mockImplementation((fn) => fn());
     process.env.JWT_REFRESH_SECRET = 'test-secret';
+  });
+
+  afterEach(() => {
+    delete process.env.OPENID_REUSE_TOKENS;
   });
 
   it('short-circuits when a bearer user is already set (no cookie work)', async () => {

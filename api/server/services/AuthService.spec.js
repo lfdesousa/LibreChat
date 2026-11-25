@@ -385,6 +385,11 @@ describe('setOpenIDAuthTokens', () => {
   });
 
   describe('cookie secure flag', () => {
+    beforeEach(() => {
+      /** `clearMocks` keeps implementations: re-arm the default the other cells set to `true` in turn. */
+      shouldUseSecureCookie.mockReturnValue(false);
+    });
+
     it('should call shouldUseSecureCookie for every cookie set', () => {
       const tokenset = {
         id_token: 'the-id-token',
