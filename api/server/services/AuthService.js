@@ -885,16 +885,24 @@ const storeOpenIDSession = async (userId, refreshToken, tenantId, previousRefres
 };
 
 /**
- * Deletes the Session document of one OpenID refresh token (system scope, like the store).
+ * Deletes the Session document of one OpenID refresh token, bound to the user (like the logout:
+ * a token that names ANOTHER user's document deletes nothing). System scope, like the store.
+ * @param {string} userId
  * @param {string|undefined} refreshToken
- * @returns {Promise<boolean>} false when there was nothing to delete
+ * @returns {Promise<boolean>} false when there was nothing of this user's to delete
  */
-const deleteOpenIDSessionDocument = async (refreshToken) => {
-  if (!refreshToken) {
+const deleteOpenIDSessionDocument = async (userId, refreshToken) => {
+  if (!userId || !refreshToken) {
     return false;
   }
-  await runAsSystem(() => deleteSession({ refreshToken }));
-  return true;
+  return runAsSystem(async () => {
+    const session = await findSession({ userId, refreshToken });
+    if (!session) {
+      return false;
+    }
+    await deleteSession({ sessionId: session._id });
+    return true;
+  });
 };
 
 /**

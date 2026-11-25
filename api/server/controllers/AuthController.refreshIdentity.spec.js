@@ -14,6 +14,7 @@ jest.mock('~/server/services/AuthService', () => ({
   requestPasswordReset: jest.fn(),
   setOpenIDAuthTokens: jest.fn(),
   storeOpenIDSession: jest.fn(),
+  deleteOpenIDSessionDocument: jest.fn(),
   setCloudFrontAuthCookies: jest.fn(),
   resetPassword: jest.fn(),
   setAuthTokens: jest.fn(),
@@ -74,7 +75,11 @@ const openIdClient = require('openid-client');
 const { logger } = require('@librechat/data-schemas');
 const { findOpenIDUser } = require('@librechat/api');
 const { refreshController } = require('./AuthController');
-const { setOpenIDAuthTokens, storeOpenIDSession } = require('~/server/services/AuthService');
+const {
+  setOpenIDAuthTokens,
+  storeOpenIDSession,
+  deleteOpenIDSessionDocument,
+} = require('~/server/services/AuthService');
 const { getOpenIdConfig, verifyOpenIdAccessToken } = require('~/strategies');
 const { getUserById } = require('~/models');
 
@@ -292,5 +297,28 @@ describe('CONSOLE-LONG-TURN-TOKEN-REFRESH ADDENDUM-2 — refreshController ident
     await refreshController(req, res);
     expect(res.send).toHaveBeenCalledWith('Refresh token not provided');
     expect(openIdClient.refreshTokenGrant).not.toHaveBeenCalled();
+  });
+
+  it("R33 — the cookie still names an older refresh token than the session's (after a mid-turn rotation): its document is deleted for the bound user", async () => {
+    refreshAnswers(signAccess(SUB_A));
+    const res = mockRes();
+    await refreshController(
+      {
+        headers: { cookie: 'token_provider=openid; refreshToken=rt-login' },
+        session: { openidTokens: { userId: 'user-A', refreshToken: 'rt-7' } },
+      },
+      res,
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(deleteOpenIDSessionDocument).toHaveBeenCalledTimes(1);
+    expect(deleteOpenIDSessionDocument).toHaveBeenCalledWith('user-A', 'rt-login');
+  });
+
+  it('R34 — the cookie names the presented token: the store deletes it, nothing is deleted twice', async () => {
+    refreshAnswers(signAccess(SUB_A));
+    const res = mockRes();
+    await refreshController(boundReq(), res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(deleteOpenIDSessionDocument).not.toHaveBeenCalled();
   });
 });

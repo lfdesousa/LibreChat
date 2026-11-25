@@ -194,13 +194,13 @@ const resetPasswordController = async (req, res) => {
  * while the cookie keeps the login one. The presented and the active tokens are handled by the
  * store (previous token) and kept, respectively. Best effort: a failure is logged, never fails the refresh.
  */
-const revokeSupersededCookieSession = async (parsedCookies, ...keptRefreshTokens) => {
+const revokeSupersededCookieSession = async (userId, parsedCookies, ...keptRefreshTokens) => {
   const named = parsedCookies.refreshToken;
   if (!named || keptRefreshTokens.includes(named)) {
     return;
   }
   try {
-    await deleteOpenIDSessionDocument(named);
+    await deleteOpenIDSessionDocument(userId, named);
   } catch (error) {
     logger.error('[refreshController] Failed to delete the superseded cookie session', error);
   }
@@ -246,7 +246,12 @@ const completeRefreshWithoutIdToken = async ({
     existingRefreshToken: refreshToken,
     tenantId: user.tenantId,
   });
-  await revokeSupersededCookieSession(parsedCookies, refreshToken, activeRefreshToken);
+  await revokeSupersededCookieSession(
+    user._id.toString(),
+    parsedCookies,
+    refreshToken,
+    activeRefreshToken,
+  );
   await saveSession(req.session);
   return res.status(200).send({ token, user: sanitizeUserForAuthResponse(user) });
 };
@@ -384,7 +389,12 @@ const refreshOpenIdSession = async (req, res, parsedCookies) => {
       existingRefreshToken: refreshToken,
       tenantId: user.tenantId,
     });
-    await revokeSupersededCookieSession(parsedCookies, refreshToken, activeRefreshToken);
+    await revokeSupersededCookieSession(
+      user._id.toString(),
+      parsedCookies,
+      refreshToken,
+      activeRefreshToken,
+    );
     await saveSession(req.session);
 
     return res.status(200).send({ token, user: sanitizeUserForAuthResponse(user) });

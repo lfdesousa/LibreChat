@@ -1524,10 +1524,15 @@ describe('logoutUser after a mid-turn token rotation (A2, review r1 F1)', () => 
   beforeEach(() => {
     jest.clearAllMocks();
     docs = new Map([
-      ['rt-0', { _id: 'doc-0' }],
-      ['rt-2', { _id: 'doc-2' }],
+      ['rt-0', { _id: 'doc-0', userId: 'user-1' }],
+      ['rt-2', { _id: 'doc-2', userId: 'user-1' }],
+      ['rt-other', { _id: 'doc-other', userId: 'user-2' }],
     ]);
-    findSession.mockImplementation(async ({ refreshToken }) => docs.get(refreshToken) ?? null);
+    /** The real lookup hashes the token AND filters on the user. */
+    findSession.mockImplementation(async ({ userId, refreshToken }) => {
+      const doc = docs.get(refreshToken);
+      return doc && doc.userId === userId ? doc : null;
+    });
     deleteSession.mockImplementation(async ({ sessionId }) => {
       for (const [token, doc] of docs) {
         if (doc._id === sessionId) {
@@ -1540,7 +1545,7 @@ describe('logoutUser after a mid-turn token rotation (A2, review r1 F1)', () => 
   it('removes the document of the session token AND the one the cookie still names (pre-rotation): none is left', async () => {
     const result = await logoutUser(reqWith('rt-0'), 'rt-2');
     expect(result.status).toBe(200);
-    expect(docs.size).toBe(0);
+    expect([...docs.keys()]).toEqual(['rt-other']);
   });
 
   it('a cookie that names the session token is looked up and deleted once', async () => {
@@ -1549,7 +1554,7 @@ describe('logoutUser after a mid-turn token rotation (A2, review r1 F1)', () => 
     expect(result.status).toBe(200);
     expect(findSession).toHaveBeenCalledTimes(1);
     expect(deleteSession).toHaveBeenCalledTimes(1);
-    expect(docs.size).toBe(0);
+    expect([...docs.keys()]).toEqual(['rt-other']);
   });
 
   it('a failing delete of the cookie-named document is a 500, like the session one', async () => {
@@ -1562,10 +1567,26 @@ describe('logoutUser after a mid-turn token rotation (A2, review r1 F1)', () => 
     expect(result.status).toBe(500);
   });
 
-  it('deleteOpenIDSessionDocument deletes one document by refresh token and ignores an empty token', async () => {
-    await expect(deleteOpenIDSessionDocument(undefined)).resolves.toBe(false);
+  it("a cookie naming ANOTHER user's refresh token deletes nothing (the lookup is bound to the user)", async () => {
+    const result = await logoutUser(reqWith('rt-other'), 'rt-2');
+    expect(result.status).toBe(200);
+    expect(findSession).toHaveBeenCalledWith({ userId: 'user-1', refreshToken: 'rt-other' });
+    expect(docs.has('rt-other')).toBe(true);
+    expect(docs.has('rt-2')).toBe(false);
+  });
+
+  it('deleteOpenIDSessionDocument deletes one document of the user and ignores an empty user or token', async () => {
+    await expect(deleteOpenIDSessionDocument('user-1', undefined)).resolves.toBe(false);
+    await expect(deleteOpenIDSessionDocument(undefined, 'rt-0')).resolves.toBe(false);
+    expect(findSession).not.toHaveBeenCalled();
+    await expect(deleteOpenIDSessionDocument('user-1', 'rt-0')).resolves.toBe(true);
+    expect(docs.has('rt-0')).toBe(false);
+  });
+
+  it("deleteOpenIDSessionDocument never deletes another user's document, even for a token the caller presents", async () => {
+    await expect(deleteOpenIDSessionDocument('user-1', 'rt-other')).resolves.toBe(false);
+    expect(findSession).toHaveBeenCalledWith({ userId: 'user-1', refreshToken: 'rt-other' });
     expect(deleteSession).not.toHaveBeenCalled();
-    await expect(deleteOpenIDSessionDocument('rt-0')).resolves.toBe(true);
-    expect(deleteSession).toHaveBeenCalledWith({ refreshToken: 'rt-0' });
+    expect(docs.has('rt-other')).toBe(true);
   });
 });

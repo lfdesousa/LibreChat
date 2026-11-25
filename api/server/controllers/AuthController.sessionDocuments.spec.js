@@ -32,14 +32,14 @@ jest.mock('~/server/services/AuthService', () => ({
       mockDocs.delete(previousRefreshToken);
     }
   }),
-  deleteOpenIDSessionDocument: jest.fn(async (refreshToken) => {
+  deleteOpenIDSessionDocument: jest.fn(async (_userId, refreshToken) => {
     mockDocs.delete(refreshToken);
   }),
 }));
 jest.mock('~/strategies', () => ({
   getOpenIdConfig: jest.fn(() => ({ clientId: 'audittrace-librechat' })),
   getOpenIdEmail: jest.fn(() => 'u@example.test'),
-  verifyOpenIdAccessToken: jest.fn(),
+  verifyOpenIdAccessToken: jest.fn(async () => ({ sub: 'kc-sub-0001' })),
 }));
 jest.mock('openid-client', () => ({ refreshTokenGrant: jest.fn() }));
 jest.mock('~/models', () => ({
@@ -61,6 +61,7 @@ jest.mock('@librechat/api', () => ({
 const jwt = require('jsonwebtoken');
 const openIdClient = require('openid-client');
 const { findOpenIDUser } = require('@librechat/api');
+const { getUserById } = require('~/models');
 const { configureTokenSource, getTokenSource } = require('~/server/services/AuditTraceAuth');
 const {
   storeOpenIDSession,
@@ -93,7 +94,7 @@ describe('Session documents after mid-turn rotations (A2, review r1 F1)', () => 
   const envBefore = { ...process.env };
 
   /** The Keycloak double: rotates the refresh token on every grant. */
-  const rotatingKeycloak = () => {
+  const rotatingKeycloak = ({ withIdToken = true } = {}) => {
     n = 0;
     openIdClient.refreshTokenGrant.mockImplementation(async () => {
       n += 1;
@@ -101,7 +102,7 @@ describe('Session documents after mid-turn rotations (A2, review r1 F1)', () => 
         access_token: makeToken(nowS() + 300),
         refresh_token: `rt-${n}`,
         expires_in: 300,
-        claims: () => ({ sub: SUB }),
+        claims: () => (withIdToken ? { sub: SUB } : undefined),
       };
     });
   };
@@ -177,5 +178,21 @@ describe('Session documents after mid-turn rotations (A2, review r1 F1)', () => 
     expect(res.status).toHaveBeenCalledWith(200);
     expect([...mockDocs]).toEqual(['rt-1']);
     expect(deleteOpenIDSessionDocument).not.toHaveBeenCalled();
+  });
+
+  it('the browser refresh is answered WITHOUT an id_token (the verifier returns the bound sub): 200 and only rt-2 has a document', async () => {
+    getUserById.mockResolvedValue(USER);
+    advance(280);
+    await midTurnRefresh();
+    expect([...mockDocs].sort()).toEqual(['rt-0', 'rt-1']);
+    rotatingKeycloak({ withIdToken: false });
+    n = 1;
+    advance(280);
+    const res = mockRes();
+    await refreshController(request(), res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(findOpenIDUser).not.toHaveBeenCalled();
+    expect(session.openidTokens.refreshToken).toBe('rt-2');
+    expect([...mockDocs]).toEqual(['rt-2']);
   });
 });
