@@ -99,6 +99,7 @@ const {
   generateRefreshToken,
   createSession,
   upsertSession,
+  findSession,
   deleteSession,
   createToken,
   deleteTokens,
@@ -116,6 +117,8 @@ const {
   setAuthTokens,
   setCloudFrontAuthCookies,
   verifyEmail,
+  logoutUser,
+  deleteOpenIDSessionDocument,
 } = require('./AuthService');
 
 /** Helper to build a mock Express response */
@@ -1506,5 +1509,63 @@ describe('registerUser - allowedDomains admin-panel override', () => {
     expect(result.message).toMatch(/cannot be used/i);
     // Domain check must happen before any DB user lookup.
     expect(findUser).not.toHaveBeenCalled();
+  });
+});
+
+describe('logoutUser after a mid-turn token rotation (A2, review r1 F1)', () => {
+  /** The Session documents, one per refresh token, behind findSession/deleteSession. */
+  let docs;
+  const reqWith = (cookieRefreshToken) => ({
+    user: { _id: 'user-1' },
+    headers: { cookie: `refreshToken=${cookieRefreshToken}` },
+    session: { destroy: jest.fn() },
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    docs = new Map([
+      ['rt-0', { _id: 'doc-0' }],
+      ['rt-2', { _id: 'doc-2' }],
+    ]);
+    findSession.mockImplementation(async ({ refreshToken }) => docs.get(refreshToken) ?? null);
+    deleteSession.mockImplementation(async ({ sessionId }) => {
+      for (const [token, doc] of docs) {
+        if (doc._id === sessionId) {
+          docs.delete(token);
+        }
+      }
+    });
+  });
+
+  it('removes the document of the session token AND the one the cookie still names (pre-rotation): none is left', async () => {
+    const result = await logoutUser(reqWith('rt-0'), 'rt-2');
+    expect(result.status).toBe(200);
+    expect(docs.size).toBe(0);
+  });
+
+  it('a cookie that names the session token is looked up and deleted once', async () => {
+    docs.delete('rt-0');
+    const result = await logoutUser(reqWith('rt-2'), 'rt-2');
+    expect(result.status).toBe(200);
+    expect(findSession).toHaveBeenCalledTimes(1);
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+    expect(docs.size).toBe(0);
+  });
+
+  it('a failing delete of the cookie-named document is a 500, like the session one', async () => {
+    deleteSession.mockImplementation(async ({ sessionId }) => {
+      if (sessionId === 'doc-0') {
+        throw new Error('db down');
+      }
+    });
+    const result = await logoutUser(reqWith('rt-0'), 'rt-2');
+    expect(result.status).toBe(500);
+  });
+
+  it('deleteOpenIDSessionDocument deletes one document by refresh token and ignores an empty token', async () => {
+    await expect(deleteOpenIDSessionDocument(undefined)).resolves.toBe(false);
+    expect(deleteSession).not.toHaveBeenCalled();
+    await expect(deleteOpenIDSessionDocument('rt-0')).resolves.toBe(true);
+    expect(deleteSession).toHaveBeenCalledWith({ refreshToken: 'rt-0' });
   });
 });

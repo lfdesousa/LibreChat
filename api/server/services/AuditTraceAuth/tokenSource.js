@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const cookies = require('cookie');
 const openIdClient = require('openid-client');
 const { logger } = require('@librechat/data-schemas');
 const { SESSION_EXPIRED, REFRESH_FAILED } = require('./sessionFailureMessages');
@@ -158,7 +159,7 @@ class TokenSource {
     } catch {
       throw failure(REFRESH_FAILED, 502, 'session_save_failed');
     }
-    await this.#storeRefreshSession(userId, refreshToken);
+    await this.#storeRefreshSession(userId, refreshToken, stored.refreshToken);
     this.#refreshCount += 1;
     logger.info('[sovereign-token] refreshed', {
       refresh_count: this.#refreshCount,
@@ -190,18 +191,24 @@ class TokenSource {
   }
 
   /**
-   * Persists the new refresh token's Session document. The previous one is kept until
-   * `refreshController` re-issues the browser's cookies (they still name it).
+   * Persists the new refresh token's Session document and deletes the replaced token's, EXCEPT
+   * when the browser's cookie still names the replaced token: that document stays until
+   * `refreshController` re-issues the cookies (and removes it) or the logout does. So a long
+   * turn leaves at most two documents: the cookie-named one and the current one.
    */
-  async #storeRefreshSession(userId, refreshToken) {
+  async #storeRefreshSession(userId, refreshToken, replacedRefreshToken) {
     if (!userId) {
       return;
     }
+    const cookieHeader = this.#req.headers?.cookie;
+    const cookieNamed = cookieHeader ? cookies.parse(cookieHeader).refreshToken : undefined;
+    const previous = replacedRefreshToken === cookieNamed ? undefined : replacedRefreshToken;
     try {
       await requireCollaborators().storeOpenIDSession(
         userId,
         refreshToken,
         this.#req.user?.tenantId,
+        previous,
       );
     } catch {
       /** The tokens are already saved in the Express session; the document is re-created by the next browser refresh. */

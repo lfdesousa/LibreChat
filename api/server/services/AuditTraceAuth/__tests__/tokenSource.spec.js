@@ -164,12 +164,30 @@ describe('AuditTraceAuth/tokenSource', () => {
     );
   });
 
-  it("the old refresh token's Session document is kept for the browser cookies that still name it (A2)", async () => {
+  it("the replaced token's Session document is kept when the browser's cookie still names it (A2)", async () => {
+    openIdClient.refreshTokenGrant.mockResolvedValue(grantAnswer());
+    const req = requestWith();
+    req.headers = { cookie: 'token_provider=openid; refreshToken=rt-0' };
+    expire();
+    await getTokenSource(req).current();
+    expect(storeOpenIDSession).toHaveBeenCalledWith('user-1', 'rt-1', undefined, undefined);
+  });
+
+  it("the replaced token's Session document is deleted when the cookie names another token", async () => {
+    openIdClient.refreshTokenGrant.mockResolvedValue(grantAnswer());
+    const req = requestWith();
+    req.headers = { cookie: 'token_provider=openid; refreshToken=rt-login' };
+    expire();
+    await getTokenSource(req).current();
+    expect(storeOpenIDSession).toHaveBeenCalledWith('user-1', 'rt-1', undefined, 'rt-0');
+  });
+
+  it("a request without cookies deletes the replaced token's document", async () => {
     openIdClient.refreshTokenGrant.mockResolvedValue(grantAnswer());
     const req = requestWith();
     expire();
     await getTokenSource(req).current();
-    expect(storeOpenIDSession).toHaveBeenCalledWith('user-1', 'rt-1', undefined);
+    expect(storeOpenIDSession).toHaveBeenCalledWith('user-1', 'rt-1', undefined, 'rt-0');
   });
 
   describe('identity after a grant without an id_token (A3)', () => {

@@ -1,3 +1,4 @@
+const cookies = require('cookie');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { createHash, webcrypto } = require('node:crypto');
@@ -6,6 +7,7 @@ const {
   getTenantId,
   DEFAULT_SESSION_EXPIRY,
   DEFAULT_REFRESH_TOKEN_EXPIRY,
+  runAsSystem,
 } = require('@librechat/data-schemas');
 const { ErrorTypes, SystemRoles, errorsToString } = require('librechat-data-provider');
 const {
@@ -188,6 +190,25 @@ const logoutUser = async (req, refreshToken) => {
       } catch (deleteErr) {
         logger.error('[logoutUser] Failed to delete session.', deleteErr);
         return { status: 500, message: 'Failed to delete session.' };
+      }
+    }
+
+    /**
+     * A mid-turn token rotation moves the session's refresh token on while the browser's cookie
+     * keeps naming the login one: its Session document must not outlive the logout either.
+     */
+    const cookieRefreshToken = req.headers?.cookie
+      ? cookies.parse(req.headers.cookie).refreshToken
+      : undefined;
+    if (cookieRefreshToken && cookieRefreshToken !== refreshToken) {
+      const cookieSession = await findSession({ userId: userId, refreshToken: cookieRefreshToken });
+      if (cookieSession) {
+        try {
+          await deleteSession({ sessionId: cookieSession._id });
+        } catch (deleteErr) {
+          logger.error('[logoutUser] Failed to delete the cookie-named session.', deleteErr);
+          return { status: 500, message: 'Failed to delete session.' };
+        }
       }
     }
 
@@ -864,6 +885,19 @@ const storeOpenIDSession = async (userId, refreshToken, tenantId, previousRefres
 };
 
 /**
+ * Deletes the Session document of one OpenID refresh token (system scope, like the store).
+ * @param {string|undefined} refreshToken
+ * @returns {Promise<boolean>} false when there was nothing to delete
+ */
+const deleteOpenIDSessionDocument = async (refreshToken) => {
+  if (!refreshToken) {
+    return false;
+  }
+  await runAsSystem(() => deleteSession({ refreshToken }));
+  return true;
+};
+
+/**
  * Resend Verification Email
  * @param {Object} req
  * @param {Object} req.body
@@ -932,6 +966,7 @@ module.exports = {
   resetPassword,
   setOpenIDAuthTokens,
   storeOpenIDSession,
+  deleteOpenIDSessionDocument,
   setCloudFrontAuthCookies,
   requestPasswordReset,
   resendVerificationEmail,

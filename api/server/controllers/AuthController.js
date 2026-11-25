@@ -15,6 +15,7 @@ const {
   requestPasswordReset,
   setOpenIDAuthTokens,
   storeOpenIDSession,
+  deleteOpenIDSessionDocument,
   setCloudFrontAuthCookies,
   resetPassword,
   setAuthTokens,
@@ -188,6 +189,24 @@ const resetPasswordController = async (req, res) => {
 };
 
 /**
+ * Once the cookies are re-issued with the active refresh token, the Session document the OLD cookie
+ * named is dead weight (and a revocation hole): a mid-turn rotation moves the session's token on
+ * while the cookie keeps the login one. The presented and the active tokens are handled by the
+ * store (previous token) and kept, respectively. Best effort: a failure is logged, never fails the refresh.
+ */
+const revokeSupersededCookieSession = async (parsedCookies, ...keptRefreshTokens) => {
+  const named = parsedCookies.refreshToken;
+  if (!named || keptRefreshTokens.includes(named)) {
+    return;
+  }
+  try {
+    await deleteOpenIDSessionDocument(named);
+  } catch (error) {
+    logger.error('[refreshController] Failed to delete the superseded cookie session', error);
+  }
+};
+
+/**
  * A refresh answered WITHOUT an id_token (`tokenset.claims()` is undefined): identity cannot come
  * from the grant, so it comes from the binding to the presented refresh token plus the `sub` of the
  * new access token, verified by the OpenID JWT strategy's own verifier (JWKS signature, issuer
@@ -227,6 +246,7 @@ const completeRefreshWithoutIdToken = async ({
     existingRefreshToken: refreshToken,
     tenantId: user.tenantId,
   });
+  await revokeSupersededCookieSession(parsedCookies, refreshToken, activeRefreshToken);
   await saveSession(req.session);
   return res.status(200).send({ token, user: sanitizeUserForAuthResponse(user) });
 };
@@ -364,6 +384,7 @@ const refreshOpenIdSession = async (req, res, parsedCookies) => {
       existingRefreshToken: refreshToken,
       tenantId: user.tenantId,
     });
+    await revokeSupersededCookieSession(parsedCookies, refreshToken, activeRefreshToken);
     await saveSession(req.session);
 
     return res.status(200).send({ token, user: sanitizeUserForAuthResponse(user) });
