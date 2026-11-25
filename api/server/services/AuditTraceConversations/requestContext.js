@@ -20,8 +20,16 @@
  * An access token stashed there would vanish across any `runAsSystem()`
  * boundary without warning. A dedicated, single-purpose store has no such
  * hidden interaction and is easier to reason about: it holds exactly one
- * thing, an access token (plus the token's own subject for
+ * thing, the request's token SOURCE (plus the token's own subject for
  * observability), for exactly one purpose.
+ *
+ * **A source, not a string (CONSOLE-LONG-TURN-TOKEN-REFRESH).** The browser's
+ * access token lives 300 s and a turn can run for 12+ minutes; a string
+ * captured at request start is dead long before the terminal save. The store
+ * therefore carries a token SOURCE (`../AuditTraceAuth`'s `TokenSource`) and
+ * `getRequestAccessToken()` is AWAITABLE: every call returns a token that is
+ * fresh now. A context built with a plain `accessToken` string (a caller with
+ * no session, the unit suites) is served as a static source.
  *
  * **Fail-closed by construction:** `getRequestAccessToken()` returns
  * `undefined` for any call outside `runWithRequestAccessToken()` — a
@@ -32,12 +40,18 @@
  */
 
 const { AsyncLocalStorage } = require('async_hooks');
+const { getTokenSource } = require('../AuditTraceAuth/tokenSource');
 
-/** @type {AsyncLocalStorage<{accessToken?: string, sub?: string}>} */
+/**
+ * @typedef {{current: () => Promise<string|undefined>}} AccessTokenSource
+ * @typedef {{accessToken?: string, source?: AccessTokenSource, sub?: string}} RequestTokenContext
+ */
+
+/** @type {AsyncLocalStorage<RequestTokenContext>} */
 const requestAccessTokenStorage = new AsyncLocalStorage();
 
 /**
- * Runs `fn` with `{accessToken, sub}` available to every synchronous AND
+ * Runs `fn` with `{source | accessToken, sub}` available to every synchronous AND
  * asynchronous call `fn` makes (Express middleware chaining, awaited
  * promises, etc. all propagate `AsyncLocalStorage` context correctly;
  * only a raw stream/event-emitter boundary — e.g. multer's multipart
@@ -46,7 +60,7 @@ const requestAccessTokenStorage = new AsyncLocalStorage();
  * `restoreTenantContextFromReq`'s own documented reason for existing).
  *
  * @template T
- * @param {{accessToken?: string, sub?: string}} context
+ * @param {RequestTokenContext} context
  * @param {() => T} fn
  * @returns {T}
  */
@@ -55,13 +69,31 @@ function runWithRequestAccessToken(context, fn) {
 }
 
 /**
- * @returns {string|undefined} the current request's access token, or
- *   `undefined` when called outside `runWithRequestAccessToken` (no live
- *   HTTP request — a background/scheduled job) or when the request had
- *   none (e.g. the user never completed the OIDC console login).
+ * @returns {AccessTokenSource|undefined} the current request's token source, or
+ *   `undefined` outside `runWithRequestAccessToken` (a background/scheduled job)
+ *   or when the request has no token (the user never completed the OIDC console
+ *   login). A context built with a plain string is served as a static source.
  */
-function getRequestAccessToken() {
-  return requestAccessTokenStorage.getStore()?.accessToken;
+function getRequestTokenSource() {
+  const store = requestAccessTokenStorage.getStore();
+  if (store?.source) {
+    return store.source;
+  }
+  if (store?.accessToken) {
+    const accessToken = store.accessToken;
+    return { current: async () => accessToken };
+  }
+  return undefined;
+}
+
+/**
+ * @returns {Promise<string|undefined>} an access token that is fresh now, or
+ *   `undefined` when called outside `runWithRequestAccessToken` or when the
+ *   request had none. Rejects with a `SovereignSessionError` (`.code`, `.status`)
+ *   when the refresh token or the SSO session reached a hard limit.
+ */
+async function getRequestAccessToken() {
+  return getRequestTokenSource()?.current();
 }
 
 /** @returns {string|undefined} the current request's subject, best-effort
@@ -72,34 +104,27 @@ function getRequestSub() {
 }
 
 /**
- * Express middleware: re-establishes the CURRENT request's access-token
- * context. For use ONLY after middleware that may cross an async
- * stream/event-emitter boundary that can drop `AsyncLocalStorage`
- * propagation (multer's multipart parser, specifically) — mirroring
- * `restoreTenantContextFromReq`'s own documented reason for existing at
- * the exact same call site (`routes/convos.js`'s `POST /import`, after
- * `handleUpload`). Reads the SAME `req.session.openidTokens.accessToken`/
- * `req.user.id` `requireJwtAuth.js` originally populated the context
- * from — this is a re-entry, not new business logic, and is NOT
- * per-route sovereign-routing wiring (the chokepoint itself lives
- * entirely in `api/models/index.js`; this only keeps the ONE ambient
- * signal it reads alive across a stream boundary already known to drop
- * ambient context for the pre-existing tenant store).
+ * Express middleware: re-establishes the CURRENT request's token context. For
+ * use ONLY after middleware that may cross an async stream/event-emitter
+ * boundary that can drop `AsyncLocalStorage` propagation (multer's multipart
+ * parser, specifically) — mirroring `restoreTenantContextFromReq`'s own
+ * documented reason for existing at the exact same call site
+ * (`routes/convos.js`'s `POST /import`, after `handleUpload`). Builds the SAME
+ * source `requireJwtAuth.js` originally populated the context with (one source
+ * per request) — a re-entry, not new business logic.
  *
  * @param {object} req
  * @param {object} _res
  * @param {Function} next
  */
 function restoreRequestAccessTokenContext(req, _res, next) {
-  runWithRequestAccessToken(
-    { accessToken: req.session?.openidTokens?.accessToken, sub: req.user?.id },
-    next,
-  );
+  runWithRequestAccessToken({ source: getTokenSource(req), sub: req.user?.id }, next);
 }
 
 module.exports = {
   runWithRequestAccessToken,
   getRequestAccessToken,
+  getRequestTokenSource,
   getRequestSub,
   restoreRequestAccessTokenContext,
   // Exported for direct unit testing only.

@@ -115,24 +115,35 @@ describe('AuditTraceSovereignAdapter — the base owns every invariant, proven o
       expect(src).toMatch(/AuditTraceConversations\/requestContext/);
     });
 
-    it('currentToken()/currentSub() read the SHARED requestContext store — a value set through runWithRequestAccessToken is what the base sees', () => {
+    it('currentToken()/currentSub() read the SHARED requestContext store — a value set through runWithRequestAccessToken is what the base sees', async () => {
       const { adapter } = makeAdapter();
-      const seen = runWithRequestAccessToken({ accessToken: 'als-token', sub: 'lc-user-1' }, () => [
-        adapter.currentToken(),
-        adapter.currentSub(),
-      ]);
+      const seen = await runWithRequestAccessToken(
+        { accessToken: 'als-token', sub: 'lc-user-1' },
+        async () => [await adapter.currentToken(), adapter.currentSub()],
+      );
       expect(seen).toEqual(['als-token', 'lc-user-1']);
-      expect(adapter.currentToken()).toBeUndefined();
+      await expect(adapter.currentToken()).resolves.toBeUndefined();
       expect(adapter.currentSub()).toBeUndefined();
     });
 
-    it('requireToken prefers the explicitly-bound token, else the shared ALS token — never fabricates one', () => {
+    it('requireToken prefers the explicitly-bound token, else the shared ALS token — never fabricates one', async () => {
       const { adapter } = makeAdapter();
-      expect(adapter.requireToken('explicit')).toBe('explicit');
-      expect(
+      await expect(adapter.requireToken('explicit')).resolves.toBe('explicit');
+      await expect(
         runWithRequestAccessToken({ accessToken: 'als-token' }, () => adapter.requireToken()),
-      ).toBe('als-token');
-      expect(() => adapter.requireToken(undefined)).toThrow(MissingAccessTokenError);
+      ).resolves.toBe('als-token');
+      await expect(adapter.requireToken(undefined)).rejects.toBeInstanceOf(MissingAccessTokenError);
+    });
+
+    it('requireToken asks the request token SOURCE per call: a later call after an expiry carries the newer token', async () => {
+      const { adapter } = makeAdapter();
+      const source = {
+        current: jest.fn().mockResolvedValueOnce('first').mockResolvedValueOnce('second'),
+      };
+      await runWithRequestAccessToken({ source }, async () => {
+        await expect(adapter.requireToken()).resolves.toBe('first');
+        await expect(adapter.requireToken()).resolves.toBe('second');
+      });
     });
   });
 

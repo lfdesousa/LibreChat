@@ -507,6 +507,7 @@ describe('CONSOLE-LONG-TURN-TOKEN-REFRESH v2 — the request token stays fresh f
   it('R15 — `sovereign_refresh_failed` (502) for a transport error and for a 5xx from the token endpoint', async () => {
     for (const opts of [{ transportError: true }, { http5xx: true }]) {
       jest.clearAllMocks();
+      clock.ms = T0_MS; // each pass starts a fresh turn (the previous pass left the clock past T0)
       store = sessionStore();
       keycloakDouble(opts);
       bffDouble();

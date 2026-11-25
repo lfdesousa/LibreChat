@@ -162,7 +162,7 @@ const {
 } = require('./mapping');
 const { SovereignMemoryError } = require('../AuditTraceMemory/errors');
 const { isSovereignBackend } = require('../AuditTraceMemory/config');
-const { getRequestAccessToken } = require('./requestContext');
+const { getRequestAccessToken, getRequestTokenSource } = require('./requestContext');
 // MongoDB-elimination WU-presets (2026-09-11, the FIRST reuse of this
 // chokepoint): the preset adapter's binders are merged into
 // `ALL_SOVEREIGN_METHOD_BINDERS` below, NOT wired via a second
@@ -964,11 +964,15 @@ function wrapModelMethods(mongoMethods) {
     }
     const binder = ALL_SOVEREIGN_METHOD_BINDERS[name];
     wrapped[name] = (...args) => {
-      const token = isSovereignBackend() ? getRequestAccessToken() : undefined;
-      if (token) {
-        return binder(token, mongoFn, mongoMethods)(...args);
+      // The synchronous "is there a live request token source" probe keeps the
+      // Mongo path synchronous for background calls; the token itself is awaited
+      // per call so a long turn's terminal save carries a token that is fresh now.
+      if (!isSovereignBackend() || !getRequestTokenSource()) {
+        return mongoFn(...args);
       }
-      return mongoFn(...args);
+      return getRequestAccessToken().then((token) =>
+        token ? binder(token, mongoFn, mongoMethods)(...args) : mongoFn(...args),
+      );
     };
   }
   return wrapped;

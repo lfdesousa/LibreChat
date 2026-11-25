@@ -485,7 +485,7 @@ class AuditTraceConversationTagsAdapter extends AuditTraceSovereignAdapter {
               // UNCHANGED, never overwrite its position/count/description.
               return existing;
             }
-            const own = await this.listOwn(this.requireToken(ctx.token));
+            const own = await this.listOwn(await this.requireToken(ctx.token));
             const maxPosition = own.reduce(
               (max, item) => (isNumber(item.position) && item.position > max ? item.position : max),
               0,
@@ -564,7 +564,7 @@ class AuditTraceConversationTagsAdapter extends AuditTraceSovereignAdapter {
               const mongoCount = await this.deferToMongo(ctx, [filter]);
               return isNumber(mongoCount) ? mongoCount : 0;
             }
-            const token = this.requireToken(ctx.token);
+            const token = await this.requireToken(ctx.token);
             const own = await this.listOwn(token);
             const ownTags = own.map((item) => item.tag).filter(isId);
             const sovereign = await this.deleteByIds(ownTags, {

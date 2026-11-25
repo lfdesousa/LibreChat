@@ -2,6 +2,7 @@ const express = require('express');
 const { logger } = require('@librechat/data-schemas');
 
 const { requireJwtAuth } = require('~/server/middleware');
+const { getFreshAccessToken } = require('~/server/services/AuditTraceAuth');
 const { callEvidenceProxy } = require('~/server/services/AuditTraceMemory/evidenceClient');
 const { SovereignMemoryError } = require('~/server/services/AuditTraceMemory/errors');
 
@@ -17,8 +18,8 @@ const router = express.Router();
 
 router.use(requireJwtAuth);
 
-/** `null` (never `undefined`) when absent, so every call below fails closed the same way. */
-const getAccessToken = (req) => req.session?.openidTokens?.accessToken || null;
+/** A token that is fresh now; `null` (never `undefined`) when absent, so every call below fails closed the same way. */
+const getAccessToken = async (req) => (await getFreshAccessToken(req)) || null;
 
 const respondError = (res, error) => {
   if (error instanceof SovereignMemoryError) {
@@ -33,7 +34,7 @@ const evidenceHandler = (kind, param) => async (req, res) => {
     const body = await callEvidenceProxy({
       kind,
       id: req.params[param],
-      token: getAccessToken(req),
+      token: await getAccessToken(req),
     });
     return res.status(200).json(body);
   } catch (error) {

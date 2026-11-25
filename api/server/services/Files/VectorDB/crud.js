@@ -12,6 +12,7 @@ const { logAxiosError, generateShortLivedToken } = require('@librechat/api');
 // default (same pattern `memories.js`/`agentMethods.js` already use).
 const { isSovereignBackend } = require('~/server/services/AuditTraceMemory/config');
 const { callConsoleFilesProxy } = require('~/server/services/AuditTraceMemory/consoleFilesClient');
+const { getFreshAccessToken } = require('~/server/services/AuditTraceAuth');
 const {
   CLIENT_REQUEST_ID_PATTERN,
   deriveNewConversationId,
@@ -119,7 +120,7 @@ function resolveUploadSessionId(req) {
  * @returns {Promise<{ bytes: number, filename: string, filepath: string, embedded: boolean }>}
  */
 async function uploadVectorsSovereign({ req, file }) {
-  const token = req?.session?.openidTokens?.accessToken || null;
+  const token = (await getFreshAccessToken(req)) || null;
   const response = await callConsoleFilesProxy({
     token,
     filePath: file.path,
