@@ -252,4 +252,45 @@ describe('CONSOLE-LONG-TURN-TOKEN-REFRESH ADDENDUM-2 — refreshController ident
     expect(verifyOpenIdAccessToken).toHaveBeenCalledTimes(1);
     expect401(res);
   });
+
+  it('R30 — a session that cannot be re-read (reload fails) is served from the request copy: the refresh still runs', async () => {
+    refreshAnswers(signAccess(SUB_A));
+    const res = mockRes();
+    const req = boundReq();
+    req.session.reload = jest.fn((cb) => cb(new Error('session gone from the store')));
+    await refreshController(req, res);
+    expect(req.session.reload).toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.status).not.toHaveBeenCalledWith(403);
+  });
+
+  it('R31 — no refresh token anywhere: answered before any lock or grant, nothing stored', async () => {
+    const res = mockRes();
+    await refreshController(
+      { headers: { cookie: 'token_provider=openid' }, session: { openidTokens: {} } },
+      res,
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.send).toHaveBeenCalledWith('Refresh token not provided');
+    expect(openIdClient.refreshTokenGrant).not.toHaveBeenCalled();
+    expect(storeOpenIDSession).not.toHaveBeenCalled();
+  });
+
+  it('R32 — the refresh token vanishes while the request waited for the lock (signed out meanwhile): answered without a grant', async () => {
+    const res = mockRes();
+    const req = boundReq();
+    req.sessionID = 'sess-vanish';
+    let reloads = 0;
+    req.session.reload = jest.fn((cb) => {
+      reloads += 1;
+      if (reloads > 1) {
+        req.session = { ...req.session, openidTokens: {} };
+      }
+      cb();
+    });
+    req.headers = { cookie: 'token_provider=openid' };
+    await refreshController(req, res);
+    expect(res.send).toHaveBeenCalledWith('Refresh token not provided');
+    expect(openIdClient.refreshTokenGrant).not.toHaveBeenCalled();
+  });
 });
