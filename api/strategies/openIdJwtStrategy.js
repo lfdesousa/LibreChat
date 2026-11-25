@@ -1,4 +1,5 @@
 const cookies = require('cookie');
+const jsonwebtoken = require('jsonwebtoken');
 const jwksRsa = require('jwks-rsa');
 const { logger, getTenantId, runAsSystem } = require('@librechat/data-schemas');
 const { CacheKeys, SystemRoles } = require('librechat-data-provider');
@@ -116,8 +117,13 @@ const isUserInAuthCacheScope = (user, { tenantId, userId }) => {
  *
  * This enables seamless migration for existing users when SharePoint integration is enabled.
  */
-const openIdJwtLogin = (openIdConfig) => {
-  let jwksRsaOptions = {
+/**
+ * The JWKS client options the strategy and `verifyOpenIdAccessToken` share (cache settings,
+ * `jwks_uri` from the OpenID config, the HTTPS proxy agent), so the two cannot drift.
+ * @param {import('openid-client').Configuration} openIdConfig
+ */
+const buildJwksRsaOptions = (openIdConfig) => {
+  const jwksRsaOptions = {
     cache: process.env.OPENID_JWKS_URL_CACHE_ENABLED
       ? isEnabled(process.env.OPENID_JWKS_URL_CACHE_ENABLED)
       : true,
@@ -129,6 +135,49 @@ const openIdJwtLogin = (openIdConfig) => {
   if (requestAgent) {
     jwksRsaOptions.requestAgent = requestAgent;
   }
+  return jwksRsaOptions;
+};
+
+/**
+ * Verifies an ACCESS token the way this strategy verifies a bearer, for callers that obtained
+ * it on a back channel (the refresh grant) and need its `sub`: RS256 signature against the
+ * realm's JWKS (the strategy's own options), the strategy's issuer allow-list, `typ` Bearer
+ * and `azp === OPENID_CLIENT_ID`. Audience is not enforced: an access token's `aud` names
+ * resource servers; `azp` is the client binding. Throws a `JsonWebTokenError` (or the JWKS
+ * client's own error when the key cannot be fetched).
+ *
+ * @param {string} token
+ * @param {import('openid-client').Configuration} openIdConfig
+ * @returns {Promise<import('jsonwebtoken').JwtPayload>} the verified payload
+ */
+const verifyOpenIdAccessToken = async (token, openIdConfig) => {
+  const decoded = jsonwebtoken.decode(token, { complete: true });
+  if (!decoded || typeof decoded !== 'object' || !decoded.header) {
+    throw new jsonwebtoken.JsonWebTokenError('access token is not a JWT');
+  }
+  const signingKey = await jwksRsa(buildJwksRsaOptions(openIdConfig)).getSigningKey(
+    decoded.header.kid,
+  );
+  const payload = jsonwebtoken.verify(token, signingKey.getPublicKey(), {
+    algorithms: ['RS256'],
+  });
+  if (typeof payload !== 'object' || payload == null) {
+    throw new jsonwebtoken.JsonWebTokenError('access token has no claims');
+  }
+  if (!isOpenIdIssuerAllowed(payload, openIdConfig)) {
+    throw new jsonwebtoken.JsonWebTokenError('access token issuer is not allowed');
+  }
+  if (payload.typ !== 'Bearer') {
+    throw new jsonwebtoken.JsonWebTokenError('access token typ is not Bearer');
+  }
+  if (!process.env.OPENID_CLIENT_ID || payload.azp !== process.env.OPENID_CLIENT_ID) {
+    throw new jsonwebtoken.JsonWebTokenError('access token azp is not this client');
+  }
+  return payload;
+};
+
+const openIdJwtLogin = (openIdConfig) => {
+  const jwksRsaOptions = buildJwksRsaOptions(openIdConfig);
 
   const audienceConfig = getOpenIdAudienceConfig();
 
@@ -293,3 +342,4 @@ const openIdJwtLogin = (openIdConfig) => {
 };
 
 module.exports = openIdJwtLogin;
+module.exports.verifyOpenIdAccessToken = verifyOpenIdAccessToken;

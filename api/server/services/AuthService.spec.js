@@ -239,6 +239,31 @@ describe('setOpenIDAuthTokens', () => {
       expect(req.session.openidTokens.lastRefreshedAt).toEqual(expect.any(Number));
     });
 
+    it('binds the session record to the LibreChat user (rotation-safe binding for id_token-less refreshes)', () => {
+      const tokenset = { access_token: 'a', refresh_token: 'r' };
+      const req = mockRequest();
+      setOpenIDAuthTokens(tokenset, req, mockResponse(), { userId: 'user-123' });
+      expect(req.session.openidTokens.userId).toBe('user-123');
+    });
+
+    it('preserves the bound user across a refresh that carries no user id', () => {
+      const tokenset = { access_token: 'a2', refresh_token: 'r2' };
+      const req = mockRequest({
+        openidTokens: { accessToken: 'a1', refreshToken: 'r1', userId: 'user-123' },
+      });
+      setOpenIDAuthTokens(tokenset, req, mockResponse(), { existingRefreshToken: 'r1' });
+      expect(req.session.openidTokens.userId).toBe('user-123');
+      expect(req.session.openidTokens.refreshToken).toBe('r2');
+    });
+
+    it('adds no `userId` key when there is nothing to bind', () => {
+      const req = mockRequest();
+      setOpenIDAuthTokens({ access_token: 'a', refresh_token: 'r' }, req, mockResponse(), {
+        existingRefreshToken: 'r',
+      });
+      expect(Object.keys(req.session.openidTokens)).not.toContain('userId');
+    });
+
     it('should return the existing unexpired session id_token when refresh omits one', () => {
       const existingIdToken = jwt.sign(
         { sub: 'user-123', exp: Math.floor(Date.now() / 1000) + 3600 },

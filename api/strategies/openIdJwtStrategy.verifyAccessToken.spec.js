@@ -137,4 +137,36 @@ describe("CONSOLE-LONG-TURN-TOKEN-REFRESH ADDENDUM-2 — verifyOpenIdAccessToken
       verify(sign(keyA, { azp: 'audittrace-opencode' }), openIdConfig),
     ).rejects.toBeInstanceOf(Error);
   });
+  it('R27b — an ID token (typ ID) is not an access token: rejected even when signed by the realm key with the right azp (A4)', async () => {
+    const verify = openIdJwtLogin.verifyOpenIdAccessToken;
+    await expect(verify(sign(keyA, { typ: 'ID' }), openIdConfig)).rejects.toBeInstanceOf(Error);
+  });
+
+  it('R27c — an HS256 token is rejected: only RS256 is accepted (algorithm confusion)', async () => {
+    const verify = openIdJwtLogin.verifyOpenIdAccessToken;
+    const hs = jwt.sign(
+      { sub: 'kc-sub-A', iss: ISSUER, azp: CLIENT, typ: 'Bearer', exp: T0_S + 300 },
+      pem(keyA.publicKey, 'spki'),
+      {
+        algorithm: 'HS256',
+        keyid: 'kid-A',
+        noTimestamp: true,
+      },
+    );
+    await expect(verify(hs, openIdConfig)).rejects.toBeInstanceOf(Error);
+  });
+
+  it('R27d — a token that is not a JWT is rejected before any JWKS request', async () => {
+    const verify = openIdJwtLogin.verifyOpenIdAccessToken;
+    await expect(verify('opaque-access-token', openIdConfig)).rejects.toBeInstanceOf(Error);
+    expect(mockGetSigningKey).not.toHaveBeenCalled();
+  });
+
+  it('R27e — a JWKS that cannot be reached surfaces the client error unchanged (the caller tells it from a refusal)', async () => {
+    const verify = openIdJwtLogin.verifyOpenIdAccessToken;
+    mockGetSigningKey.mockRejectedValueOnce(
+      Object.assign(new Error('jwks down'), { name: 'JwksError' }),
+    );
+    await expect(verify(sign(keyA, {}), openIdConfig)).rejects.toMatchObject({ name: 'JwksError' });
+  });
 });

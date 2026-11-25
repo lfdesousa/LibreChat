@@ -795,12 +795,15 @@ const setOpenIDAuthTokens = (
 
     /** Store tokens server-side in session to avoid large cookies */
     if (req.session) {
+      /** `userId` binds the server-side session to the LibreChat user across refreshes (rotation-safe). */
+      const sessionUserId = userId ?? req.session.openidTokens?.userId;
       req.session.openidTokens = {
         accessToken: tokenset.access_token,
         idToken: logoutIdToken,
         refreshToken: refreshToken,
         expiresAt: expirationDate.getTime(),
         lastRefreshedAt: Date.now(),
+        ...(sessionUserId ? { userId: sessionUserId } : {}),
       };
     } else {
       logger.warn('[setOpenIDAuthTokens] No session available, falling back to cookies');

@@ -1,3 +1,4 @@
+const { createHash } = require('crypto');
 const cookies = require('cookie');
 const jwt = require('jsonwebtoken');
 const openIdClient = require('openid-client');
@@ -27,7 +28,9 @@ const {
   findUser,
 } = require('~/models');
 const { getGraphApiToken } = require('~/server/services/GraphTokenService');
-const { getOpenIdConfig, getOpenIdEmail } = require('~/strategies');
+const { getOpenIdConfig, getOpenIdEmail, verifyOpenIdAccessToken } = require('~/strategies');
+const { withSessionLock } = require('~/server/services/AuditTraceAuth/refreshLock');
+const { reloadSession, saveSession } = require('~/server/services/AuditTraceAuth/settle');
 
 const AUTH_REFRESH_USER_PROJECTION = '-password -__v -totpSecret -backupCodes -federatedTokens';
 /**
@@ -76,6 +79,37 @@ const getValidOpenIDReuseUserId = (parsedCookies) => {
   try {
     const payload = jwt.verify(openidUserId, process.env.JWT_REFRESH_SECRET);
     return typeof payload === 'object' && payload != null && typeof payload.id === 'string'
+      ? payload.id
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * The user a refresh is bound to, tied to the refresh token actually PRESENTED:
+ *  1. the server-side `userId` the session record carries (written at login and preserved by
+ *     every refresh, so a refresh token the mid-turn source rotated never breaks the binding);
+ *  2. else the signed `openid_user_id` cookie whose `refreshTokenHash` equals the hash of the
+ *     presented refresh token (a signed binding minted for ANOTHER token does not count);
+ *  3. else `null`: no binding, no identity.
+ */
+const getBoundOpenIDUserId = (req, parsedCookies, presentedRefreshToken) => {
+  const sessionUserId = req.session?.openidTokens?.userId;
+  if (typeof sessionUserId === 'string' && sessionUserId) {
+    return sessionUserId;
+  }
+  const signed = parsedCookies.openid_user_id;
+  if (!signed || !process.env.JWT_REFRESH_SECRET) {
+    return null;
+  }
+  try {
+    const payload = jwt.verify(signed, process.env.JWT_REFRESH_SECRET);
+    const hash = createHash('sha256').update(presentedRefreshToken).digest('base64url');
+    return typeof payload === 'object' &&
+      payload != null &&
+      typeof payload.id === 'string' &&
+      payload.refreshTokenHash === hash
       ? payload.id
       : null;
   } catch {
@@ -153,114 +187,207 @@ const resetPasswordController = async (req, res) => {
   }
 };
 
+/**
+ * A refresh answered WITHOUT an id_token (`tokenset.claims()` is undefined): identity cannot come
+ * from the grant, so it comes from the binding to the presented refresh token plus the `sub` of the
+ * new access token, verified by the OpenID JWT strategy's own verifier (JWKS signature, issuer
+ * allow-list, `azp === OPENID_CLIENT_ID`) and equal to the bound user's `openidId`. Any gap is a
+ * 401 to `/login` with nothing stored: never an unverified decode, never a 403 crash.
+ */
+const completeRefreshWithoutIdToken = async ({
+  req,
+  res,
+  parsedCookies,
+  tokenset,
+  refreshToken,
+  openIdConfig,
+}) => {
+  const denied = (reason) => {
+    logger.warn(`[refreshController] OpenID refresh without id_token refused: ${reason}`);
+    return res.status(401).redirect('/login');
+  };
+  const boundUserId = getBoundOpenIDUserId(req, parsedCookies, refreshToken);
+  if (!boundUserId) {
+    return denied('no_binding');
+  }
+  let payload;
+  try {
+    payload = await verifyOpenIdAccessToken(tokenset.access_token, openIdConfig);
+  } catch {
+    return denied('access_token_not_verified');
+  }
+  const user = await getUserById(boundUserId, AUTH_REFRESH_USER_PROJECTION);
+  if (!user?.openidId || payload?.sub !== user.openidId) {
+    return denied('subject_mismatch');
+  }
+  const activeRefreshToken = tokenset.refresh_token || refreshToken;
+  await storeOpenIDSession(user._id.toString(), activeRefreshToken, user.tenantId, refreshToken);
+  const token = setOpenIDAuthTokens(tokenset, req, res, {
+    userId: user._id.toString(),
+    existingRefreshToken: refreshToken,
+    tenantId: user.tenantId,
+  });
+  await saveSession(req.session);
+  return res.status(200).send({ token, user: sanitizeUserForAuthResponse(user) });
+};
+
+/**
+ * Serves the session's token without an IdP refresh when it was refreshed recently and is still
+ * outside the expiry buffer (the browser's own earlier refresh, or the mid-turn token source).
+ * The reuse needs a binding to the user: the signed `openid_user_id` cookie or the session's
+ * server-side `userId`.
+ *
+ * @returns {Promise<import('express').Response|undefined>} the sent response, or `undefined` when no reuse applies
+ */
+const serveReusableOpenIDSession = async (req, res, parsedCookies) => {
+  /**
+   * Reuse skips an IdP refresh only for recently-refreshed server-side tokens.
+   * Stale, missing, or near-expiry tokens fall through to refreshTokenGrant so
+   * upstream revocations and cookie/session extension are checked regularly.
+   */
+  const reusableSessionToken = getReusableOpenIDSessionToken(req.session?.openidTokens);
+  const reuseUserId = reusableSessionToken
+    ? (getValidOpenIDReuseUserId(parsedCookies) ?? req.session?.openidTokens?.userId ?? null)
+    : null;
+  if (!reuseUserId) {
+    return undefined;
+  }
+  const user = await getUserById(reuseUserId, AUTH_REFRESH_USER_PROJECTION);
+  if (!user) {
+    return undefined;
+  }
+  const cloudFrontCookiesSet = setCloudFrontAuthCookies(req, res, user);
+  logger.debug('[refreshController] OpenID session token reused', {
+    token_type: reusableSessionToken.type,
+    has_id_token: Boolean(req.session?.openidTokens?.idToken),
+    has_access_token: Boolean(req.session?.openidTokens?.accessToken),
+    cloudfront_cookies_set: cloudFrontCookiesSet,
+  });
+  return res.status(200).send({
+    token: reusableSessionToken.token,
+    user: sanitizeUserForAuthResponse(user),
+  });
+};
+
+const reloadOpenIDSession = (req) =>
+  reloadSession(req.session).catch(() => {
+    logger.debug('[refreshController] OpenID session reload failed; using the request copy');
+  });
+
+/**
+ * The OpenID refresh grant, run under the per-session lock the mid-turn token source shares
+ * (`AuditTraceAuth/refreshLock`): the session is re-read once the lock is held, so a token the
+ * source refreshed while this request waited is reused instead of presented a second time.
+ */
+const refreshOpenIdSession = async (req, res, parsedCookies) => {
+  await reloadOpenIDSession(req);
+  /** For OpenID users, read refresh token from session to avoid large cookie issues */
+  const refreshToken = req.session?.openidTokens?.refreshToken || parsedCookies.refreshToken;
+
+  if (!refreshToken) {
+    return res.status(200).send('Refresh token not provided');
+  }
+
+  try {
+    const reused = await serveReusableOpenIDSession(req, res, parsedCookies);
+    if (reused) {
+      return reused;
+    }
+
+    const openIdConfig = getOpenIdConfig();
+    const refreshParams = buildOpenIDRefreshParams();
+    logger.debug('[refreshController] OpenID refresh params', {
+      has_scope: Boolean(process.env.OPENID_SCOPE),
+      has_refresh_audience: Boolean(process.env.OPENID_REFRESH_AUDIENCE),
+    });
+    const tokenset = await openIdClient.refreshTokenGrant(
+      openIdConfig,
+      refreshToken,
+      refreshParams,
+    );
+    logger.debug('[refreshController] OpenID refresh succeeded', {
+      has_access_token: Boolean(tokenset.access_token),
+      has_id_token: Boolean(tokenset.id_token),
+      has_refresh_token: Boolean(tokenset.refresh_token),
+      expires_in: tokenset.expires_in,
+    });
+    const claims = tokenset.claims();
+    if (!claims) {
+      return await completeRefreshWithoutIdToken({
+        req,
+        res,
+        parsedCookies,
+        tokenset,
+        refreshToken,
+        openIdConfig,
+      });
+    }
+    const openidIssuer = getOpenIdIssuer(claims, openIdConfig);
+    const { user, error, migration } = await findOpenIDUser({
+      findUser,
+      email: getOpenIdEmail(claims),
+      openidId: claims.sub,
+      openidIssuer,
+      idOnTheSource: claims.oid,
+      strategyName: 'refreshController',
+    });
+
+    logger.debug(
+      `[refreshController] findOpenIDUser result: user=${user?.email ?? 'null'}, error=${error ?? 'null'}, migration=${migration}, userOpenidId=${user?.openidId ?? 'null'}, claimsSub=${claims.sub}`,
+    );
+
+    if (error || !user) {
+      logger.warn(
+        `[refreshController] Redirecting to /login: error=${error ?? 'null'}, user=${user ? 'exists' : 'null'}`,
+      );
+      return res.status(401).redirect('/login');
+    }
+
+    // Handle migration: update user with openidId if found by email without openidId
+    // Also handle case where user has mismatched openidId (e.g., after database switch)
+    if (migration || user.openidId !== claims.sub) {
+      const reason = migration ? 'migration' : 'openidId mismatch';
+      await updateUser(user._id.toString(), {
+        provider: 'openid',
+        openidId: claims.sub,
+        ...(openidIssuer ? { openidIssuer } : {}),
+      });
+      logger.info(
+        `[refreshController] Updated user ${user.email} openidId (${reason}): ${user.openidId ?? 'null'} -> ${claims.sub}`,
+      );
+    }
+
+    const activeRefreshToken = tokenset.refresh_token || refreshToken;
+    await storeOpenIDSession(user._id.toString(), activeRefreshToken, user.tenantId, refreshToken);
+    const token = setOpenIDAuthTokens(tokenset, req, res, {
+      userId: user._id.toString(),
+      existingRefreshToken: refreshToken,
+      tenantId: user.tenantId,
+    });
+    await saveSession(req.session);
+
+    return res.status(200).send({ token, user: sanitizeUserForAuthResponse(user) });
+  } catch (error) {
+    logger.error('[refreshController] OpenID token refresh error', error);
+    return res.status(403).send('Invalid OpenID refresh token');
+  }
+};
+
 const refreshController = async (req, res) => {
   const parsedCookies = req.headers.cookie ? cookies.parse(req.headers.cookie) : {};
   const token_provider = parsedCookies.token_provider;
 
   if (token_provider === 'openid' && isEnabled(process.env.OPENID_REUSE_TOKENS)) {
-    /** For OpenID users, read refresh token from session to avoid large cookie issues */
-    const refreshToken = req.session?.openidTokens?.refreshToken || parsedCookies.refreshToken;
-
-    if (!refreshToken) {
+    /**
+     * Decide on the STORED state first: this request's session copy can be a whole turn old, and
+     * a request with no refresh token must not queue for the lock. The grant itself runs under
+     * the lock, where the session is re-read once more.
+     */
+    await reloadOpenIDSession(req);
+    if (!(req.session?.openidTokens?.refreshToken || parsedCookies.refreshToken)) {
       return res.status(200).send('Refresh token not provided');
     }
-
-    try {
-      /**
-       * Reuse skips an IdP refresh only for recently-refreshed server-side tokens.
-       * Stale, missing, or near-expiry tokens fall through to refreshTokenGrant so
-       * upstream revocations and cookie/session extension are checked regularly.
-       */
-      const reusableSessionToken = getReusableOpenIDSessionToken(req.session?.openidTokens);
-      const reuseUserId = reusableSessionToken ? getValidOpenIDReuseUserId(parsedCookies) : null;
-      if (reuseUserId) {
-        const user = await getUserById(reuseUserId, AUTH_REFRESH_USER_PROJECTION);
-        if (user) {
-          const cloudFrontCookiesSet = setCloudFrontAuthCookies(req, res, user);
-          logger.debug('[refreshController] OpenID session token reused', {
-            token_type: reusableSessionToken.type,
-            has_id_token: Boolean(req.session?.openidTokens?.idToken),
-            has_access_token: Boolean(req.session?.openidTokens?.accessToken),
-            cloudfront_cookies_set: cloudFrontCookiesSet,
-          });
-          return res.status(200).send({
-            token: reusableSessionToken.token,
-            user: sanitizeUserForAuthResponse(user),
-          });
-        }
-      }
-
-      const openIdConfig = getOpenIdConfig();
-      const refreshParams = buildOpenIDRefreshParams();
-      logger.debug('[refreshController] OpenID refresh params', {
-        has_scope: Boolean(process.env.OPENID_SCOPE),
-        has_refresh_audience: Boolean(process.env.OPENID_REFRESH_AUDIENCE),
-      });
-      const tokenset = await openIdClient.refreshTokenGrant(
-        openIdConfig,
-        refreshToken,
-        refreshParams,
-      );
-      logger.debug('[refreshController] OpenID refresh succeeded', {
-        has_access_token: Boolean(tokenset.access_token),
-        has_id_token: Boolean(tokenset.id_token),
-        has_refresh_token: Boolean(tokenset.refresh_token),
-        expires_in: tokenset.expires_in,
-      });
-      const claims = tokenset.claims();
-      const openidIssuer = getOpenIdIssuer(claims, openIdConfig);
-      const { user, error, migration } = await findOpenIDUser({
-        findUser,
-        email: getOpenIdEmail(claims),
-        openidId: claims.sub,
-        openidIssuer,
-        idOnTheSource: claims.oid,
-        strategyName: 'refreshController',
-      });
-
-      logger.debug(
-        `[refreshController] findOpenIDUser result: user=${user?.email ?? 'null'}, error=${error ?? 'null'}, migration=${migration}, userOpenidId=${user?.openidId ?? 'null'}, claimsSub=${claims.sub}`,
-      );
-
-      if (error || !user) {
-        logger.warn(
-          `[refreshController] Redirecting to /login: error=${error ?? 'null'}, user=${user ? 'exists' : 'null'}`,
-        );
-        return res.status(401).redirect('/login');
-      }
-
-      // Handle migration: update user with openidId if found by email without openidId
-      // Also handle case where user has mismatched openidId (e.g., after database switch)
-      if (migration || user.openidId !== claims.sub) {
-        const reason = migration ? 'migration' : 'openidId mismatch';
-        await updateUser(user._id.toString(), {
-          provider: 'openid',
-          openidId: claims.sub,
-          ...(openidIssuer ? { openidIssuer } : {}),
-        });
-        logger.info(
-          `[refreshController] Updated user ${user.email} openidId (${reason}): ${user.openidId ?? 'null'} -> ${claims.sub}`,
-        );
-      }
-
-      const activeRefreshToken = tokenset.refresh_token || refreshToken;
-      await storeOpenIDSession(
-        user._id.toString(),
-        activeRefreshToken,
-        user.tenantId,
-        refreshToken,
-      );
-      const token = setOpenIDAuthTokens(tokenset, req, res, {
-        userId: user._id.toString(),
-        existingRefreshToken: refreshToken,
-        tenantId: user.tenantId,
-      });
-
-      return res.status(200).send({ token, user: sanitizeUserForAuthResponse(user) });
-    } catch (error) {
-      logger.error('[refreshController] OpenID token refresh error', error);
-      return res.status(403).send('Invalid OpenID refresh token');
-    }
+    return withSessionLock(req.sessionID, () => refreshOpenIdSession(req, res, parsedCookies));
   }
 
   /** For non-OpenID users, read refresh token from cookies */
