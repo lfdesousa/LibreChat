@@ -139,6 +139,25 @@ const buildJwksRsaOptions = (openIdConfig) => {
 };
 
 /**
+ * One JWKS client per `jwksUri`, kept for the life of the process, so the client's own key cache
+ * (`cache`, `cacheMaxAge`) hits across verifications instead of one JWKS fetch per refresh.
+ * @type {Map<string, ReturnType<typeof jwksRsa>>}
+ */
+const jwksClients = new Map();
+
+const getJwksClient = (options) => {
+  let client = jwksClients.get(options.jwksUri);
+  if (!client) {
+    client = jwksRsa(options);
+    jwksClients.set(options.jwksUri, client);
+  }
+  return client;
+};
+
+/** Test-only: forget the cached JWKS clients. */
+const resetJwksClients = () => jwksClients.clear();
+
+/**
  * Verifies an ACCESS token the way this strategy verifies a bearer, for callers that obtained
  * it on a back channel (the refresh grant) and need its `sub`: RS256 signature against the
  * realm's JWKS (the strategy's own options), the strategy's issuer allow-list, `typ` Bearer
@@ -155,7 +174,7 @@ const verifyOpenIdAccessToken = async (token, openIdConfig) => {
   if (!decoded || typeof decoded !== 'object' || !decoded.header) {
     throw new jsonwebtoken.JsonWebTokenError('access token is not a JWT');
   }
-  const signingKey = await jwksRsa(buildJwksRsaOptions(openIdConfig)).getSigningKey(
+  const signingKey = await getJwksClient(buildJwksRsaOptions(openIdConfig)).getSigningKey(
     decoded.header.kid,
   );
   const payload = jsonwebtoken.verify(token, signingKey.getPublicKey(), {
@@ -343,3 +362,4 @@ const openIdJwtLogin = (openIdConfig) => {
 
 module.exports = openIdJwtLogin;
 module.exports.verifyOpenIdAccessToken = verifyOpenIdAccessToken;
+module.exports.resetJwksClients = resetJwksClients;

@@ -97,6 +97,7 @@ describe("CONSOLE-LONG-TURN-TOKEN-REFRESH ADDENDUM-2 — verifyOpenIdAccessToken
   beforeEach(() => {
     jest.clearAllMocks();
     nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => (T0_S + 5) * 1000);
+    openIdJwtLogin.resetJwksClients();
     process.env.OPENID_CLIENT_ID = CLIENT;
     // the JWKS serves key A only (whatever kid is asked)
     mockGetSigningKey.mockImplementation(async () => ({
@@ -168,5 +169,13 @@ describe("CONSOLE-LONG-TURN-TOKEN-REFRESH ADDENDUM-2 — verifyOpenIdAccessToken
       Object.assign(new Error('jwks down'), { name: 'JwksError' }),
     );
     await expect(verify(sign(keyA, {}), openIdConfig)).rejects.toMatchObject({ name: 'JwksError' });
+  });
+
+  it('R27f — one JWKS client serves every verification of a jwksUri (its key cache can hit)', async () => {
+    const verify = openIdJwtLogin.verifyOpenIdAccessToken;
+    await verify(sign(keyA, {}), openIdConfig);
+    await verify(sign(keyA, {}), openIdConfig);
+    expect(jwksRsa).toHaveBeenCalledTimes(1);
+    expect(mockGetSigningKey).toHaveBeenCalledTimes(2);
   });
 });
