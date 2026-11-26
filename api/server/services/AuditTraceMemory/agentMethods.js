@@ -41,6 +41,7 @@
  */
 
 const auditTraceMemory = require('./index');
+const { getFreshAccessToken } = require('../AuditTraceAuth');
 const { resolveCreateTarget, buildCompositeKey } = require('./keyMapping');
 const { isSovereignBackend } = require('./config');
 
@@ -113,22 +114,28 @@ function formatMemories(memories) {
  * that generic call signature (mirrors `memories.js`'s explicit,
  * non-ambient token threading).
  *
- * @param {{token: string|null}} params
+ * @param {{token?: string|null, getToken?: () => Promise<string|null|undefined>}} params
+ *   `getToken` (a fresh-token source) wins over a static `token`.
  */
-function createSovereignAgentMemoryMethods({ token }) {
+function createSovereignAgentMemoryMethods({ token, getToken }) {
+  /** A bound `token` is static; a `getToken` source is asked per call (a turn outlives one token). */
+  const tokenFor = async () => (getToken ? ((await getToken()) ?? null) : token);
   return {
     async setMemory({ userId, key, value }) {
-      return auditTraceMemory.createMemory({ userId, key, value, token });
+      return auditTraceMemory.createMemory({ userId, key, value, token: await tokenFor() });
     },
     async deleteMemory({ userId, key }) {
       const compositeKey = resolveWriteCompositeKey(key);
-      return auditTraceMemory.deleteMemory({ userId, key: compositeKey, token });
+      return auditTraceMemory.deleteMemory({ userId, key: compositeKey, token: await tokenFor() });
     },
     async getUserMemories({ userId }) {
-      return auditTraceMemory.getAllUserMemories({ userId, token });
+      return auditTraceMemory.getAllUserMemories({ userId, token: await tokenFor() });
     },
     async getFormattedMemories({ userId }) {
-      const memories = await auditTraceMemory.getAllUserMemories({ userId, token });
+      const memories = await auditTraceMemory.getAllUserMemories({
+        userId,
+        token: await tokenFor(),
+      });
       return formatMemories(memories);
     },
   };
@@ -150,7 +157,7 @@ function createSovereignAgentMemoryMethods({ token }) {
  * the two large, hard-to-unit-test call sites — the same "extract the pure
  * seam" pattern `client.memory.spec.js` already uses for this controller.
  *
- * @param {{req: {session?: {openidTokens?: {accessToken?: string}}}, mongoMethods: object}} params
+ * @param {{req: object, mongoMethods: object}} params
  * @returns {object} `mongoMethods` (same reference) under the default
  *   `mongo` flag; the sovereign bridge otherwise.
  */
@@ -158,8 +165,7 @@ function resolveMemoryWriteMethods({ req, mongoMethods }) {
   if (!isSovereignBackend()) {
     return mongoMethods;
   }
-  const token = req?.session?.openidTokens?.accessToken || null;
-  return createSovereignAgentMemoryMethods({ token });
+  return createSovereignAgentMemoryMethods({ getToken: () => getFreshAccessToken(req) });
 }
 
 /**

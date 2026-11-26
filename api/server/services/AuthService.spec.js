@@ -1,46 +1,34 @@
-jest.mock(
-  '@librechat/data-schemas',
-  () => ({
-    logger: { info: jest.fn(), warn: jest.fn(), debug: jest.fn(), error: jest.fn() },
-    runAsSystem: (callback) => callback(),
-    getTenantId: jest.fn(() => undefined),
-    DEFAULT_SESSION_EXPIRY: 900000,
-    DEFAULT_REFRESH_TOKEN_EXPIRY: 604800000,
-  }),
-  { virtual: true },
-);
-jest.mock(
-  'librechat-data-provider',
-  () => ({
-    ErrorTypes: {},
-    SystemRoles: { USER: 'USER', ADMIN: 'ADMIN' },
-    errorsToString: jest.fn(),
-  }),
-  { virtual: true },
-);
-jest.mock(
-  '@librechat/api',
-  () => ({
-    isEnabled: jest.fn((val) => val === 'true' || val === true),
-    checkEmailConfig: jest.fn(),
-    isEmailDomainAllowed: jest.fn(),
-    math: jest.fn((val, fallback) => (val ? Number(val) : fallback)),
-    storeOpenIdSession: jest.fn(),
-    shouldUseSecureCookie: jest.fn(() => false),
-    resolveAppConfigForUser: jest.fn(async (_getAppConfig, _user) => ({})),
-    setCloudFrontCookies: jest.fn(() => true),
-    getCloudFrontConfig: jest.fn(() => ({
-      domain: 'https://cdn.example.com',
-      imageSigning: 'cookies',
-      cookieDomain: '.example.com',
-      privateKey: 'test-private-key',
-      keyPairId: 'K123ABC',
-    })),
-    parseCloudFrontCookieScope: jest.fn(() => null),
-    CLOUDFRONT_SCOPE_COOKIE: 'LibreChat-CloudFront-Scope',
-  }),
-  { virtual: true },
-);
+jest.mock('@librechat/data-schemas', () => ({
+  logger: { info: jest.fn(), warn: jest.fn(), debug: jest.fn(), error: jest.fn() },
+  runAsSystem: (callback) => callback(),
+  getTenantId: jest.fn(() => undefined),
+  DEFAULT_SESSION_EXPIRY: 900000,
+  DEFAULT_REFRESH_TOKEN_EXPIRY: 604800000,
+}));
+jest.mock('librechat-data-provider', () => ({
+  ErrorTypes: {},
+  SystemRoles: { USER: 'USER', ADMIN: 'ADMIN' },
+  errorsToString: jest.fn(),
+}));
+jest.mock('@librechat/api', () => ({
+  isEnabled: jest.fn((val) => val === 'true' || val === true),
+  checkEmailConfig: jest.fn(),
+  isEmailDomainAllowed: jest.fn(),
+  math: jest.fn((val, fallback) => (val ? Number(val) : fallback)),
+  storeOpenIdSession: jest.fn(),
+  shouldUseSecureCookie: jest.fn(() => false),
+  resolveAppConfigForUser: jest.fn(async (_getAppConfig, _user) => ({})),
+  setCloudFrontCookies: jest.fn(() => true),
+  getCloudFrontConfig: jest.fn(() => ({
+    domain: 'https://cdn.example.com',
+    imageSigning: 'cookies',
+    cookieDomain: '.example.com',
+    privateKey: 'test-private-key',
+    keyPairId: 'K123ABC',
+  })),
+  parseCloudFrontCookieScope: jest.fn(() => null),
+  CLOUDFRONT_SCOPE_COOKIE: 'LibreChat-CloudFront-Scope',
+}));
 jest.mock('~/models', () => ({
   findUser: jest.fn(),
   findToken: jest.fn(),
@@ -99,6 +87,7 @@ const {
   generateRefreshToken,
   createSession,
   upsertSession,
+  findSession,
   deleteSession,
   createToken,
   deleteTokens,
@@ -116,6 +105,8 @@ const {
   setAuthTokens,
   setCloudFrontAuthCookies,
   verifyEmail,
+  logoutUser,
+  deleteOpenIDSessionDocument,
 } = require('./AuthService');
 
 /** Helper to build a mock Express response */
@@ -237,6 +228,31 @@ describe('setOpenIDAuthTokens', () => {
       expect(req.session.openidTokens.idToken).toBe('the-id-token');
       expect(req.session.openidTokens.refreshToken).toBe('the-refresh-token');
       expect(req.session.openidTokens.lastRefreshedAt).toEqual(expect.any(Number));
+    });
+
+    it('binds the session record to the LibreChat user (rotation-safe binding for id_token-less refreshes)', () => {
+      const tokenset = { access_token: 'a', refresh_token: 'r' };
+      const req = mockRequest();
+      setOpenIDAuthTokens(tokenset, req, mockResponse(), { userId: 'user-123' });
+      expect(req.session.openidTokens.userId).toBe('user-123');
+    });
+
+    it('preserves the bound user across a refresh that carries no user id', () => {
+      const tokenset = { access_token: 'a2', refresh_token: 'r2' };
+      const req = mockRequest({
+        openidTokens: { accessToken: 'a1', refreshToken: 'r1', userId: 'user-123' },
+      });
+      setOpenIDAuthTokens(tokenset, req, mockResponse(), { existingRefreshToken: 'r1' });
+      expect(req.session.openidTokens.userId).toBe('user-123');
+      expect(req.session.openidTokens.refreshToken).toBe('r2');
+    });
+
+    it('adds no `userId` key when there is nothing to bind', () => {
+      const req = mockRequest();
+      setOpenIDAuthTokens({ access_token: 'a', refresh_token: 'r' }, req, mockResponse(), {
+        existingRefreshToken: 'r',
+      });
+      expect(Object.keys(req.session.openidTokens)).not.toContain('userId');
     });
 
     it('should return the existing unexpired session id_token when refresh omits one', () => {
@@ -369,6 +385,11 @@ describe('setOpenIDAuthTokens', () => {
   });
 
   describe('cookie secure flag', () => {
+    beforeEach(() => {
+      /** `clearMocks` keeps implementations: re-arm the default the other cells set to `true` in turn. */
+      shouldUseSecureCookie.mockReturnValue(false);
+    });
+
     it('should call shouldUseSecureCookie for every cookie set', () => {
       const tokenset = {
         id_token: 'the-id-token',
@@ -1481,5 +1502,84 @@ describe('registerUser - allowedDomains admin-panel override', () => {
     expect(result.message).toMatch(/cannot be used/i);
     // Domain check must happen before any DB user lookup.
     expect(findUser).not.toHaveBeenCalled();
+  });
+});
+
+describe('logoutUser after a mid-turn token rotation (A2, review r1 F1)', () => {
+  /** The Session documents, one per refresh token, behind findSession/deleteSession. */
+  let docs;
+  const reqWith = (cookieRefreshToken) => ({
+    user: { _id: 'user-1' },
+    headers: { cookie: `refreshToken=${cookieRefreshToken}` },
+    session: { destroy: jest.fn() },
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    docs = new Map([
+      ['rt-0', { _id: 'doc-0', userId: 'user-1' }],
+      ['rt-2', { _id: 'doc-2', userId: 'user-1' }],
+      ['rt-other', { _id: 'doc-other', userId: 'user-2' }],
+    ]);
+    /** The real lookup hashes the token AND filters on the user. */
+    findSession.mockImplementation(async ({ userId, refreshToken }) => {
+      const doc = docs.get(refreshToken);
+      return doc && doc.userId === userId ? doc : null;
+    });
+    deleteSession.mockImplementation(async ({ sessionId }) => {
+      for (const [token, doc] of docs) {
+        if (doc._id === sessionId) {
+          docs.delete(token);
+        }
+      }
+    });
+  });
+
+  it('removes the document of the session token AND the one the cookie still names (pre-rotation): none is left', async () => {
+    const result = await logoutUser(reqWith('rt-0'), 'rt-2');
+    expect(result.status).toBe(200);
+    expect([...docs.keys()]).toEqual(['rt-other']);
+  });
+
+  it('a cookie that names the session token is looked up and deleted once', async () => {
+    docs.delete('rt-0');
+    const result = await logoutUser(reqWith('rt-2'), 'rt-2');
+    expect(result.status).toBe(200);
+    expect(findSession).toHaveBeenCalledTimes(1);
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+    expect([...docs.keys()]).toEqual(['rt-other']);
+  });
+
+  it('a failing delete of the cookie-named document is a 500, like the session one', async () => {
+    deleteSession.mockImplementation(async ({ sessionId }) => {
+      if (sessionId === 'doc-0') {
+        throw new Error('db down');
+      }
+    });
+    const result = await logoutUser(reqWith('rt-0'), 'rt-2');
+    expect(result.status).toBe(500);
+  });
+
+  it("a cookie naming ANOTHER user's refresh token deletes nothing (the lookup is bound to the user)", async () => {
+    const result = await logoutUser(reqWith('rt-other'), 'rt-2');
+    expect(result.status).toBe(200);
+    expect(findSession).toHaveBeenCalledWith({ userId: 'user-1', refreshToken: 'rt-other' });
+    expect(docs.has('rt-other')).toBe(true);
+    expect(docs.has('rt-2')).toBe(false);
+  });
+
+  it('deleteOpenIDSessionDocument deletes one document of the user and ignores an empty user or token', async () => {
+    await expect(deleteOpenIDSessionDocument('user-1', undefined)).resolves.toBe(false);
+    await expect(deleteOpenIDSessionDocument(undefined, 'rt-0')).resolves.toBe(false);
+    expect(findSession).not.toHaveBeenCalled();
+    await expect(deleteOpenIDSessionDocument('user-1', 'rt-0')).resolves.toBe(true);
+    expect(docs.has('rt-0')).toBe(false);
+  });
+
+  it("deleteOpenIDSessionDocument never deletes another user's document, even for a token the caller presents", async () => {
+    await expect(deleteOpenIDSessionDocument('user-1', 'rt-other')).resolves.toBe(false);
+    expect(findSession).toHaveBeenCalledWith({ userId: 'user-1', refreshToken: 'rt-other' });
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(docs.has('rt-other')).toBe(true);
   });
 });

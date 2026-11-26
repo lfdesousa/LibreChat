@@ -13,6 +13,21 @@ const {
 const {
   runWithRequestAccessToken,
 } = require('~/server/services/AuditTraceConversations/requestContext');
+const { getTokenSource, configureTokenSource } = require('~/server/services/AuditTraceAuth');
+
+/**
+ * The request token source refreshes the console token mid-turn with the OpenID stack's own
+ * pieces. They are handed over here, by the middleware that owns authentication, because the
+ * request context (imported by `~/models`) cannot import them without closing a cycle.
+ * Each is resolved at call time, so nothing heavy loads with this middleware.
+ */
+configureTokenSource({
+  getOpenIdConfig: () => require('~/strategies').getOpenIdConfig(),
+  verifyOpenIdAccessToken: (token, config) =>
+    require('~/strategies').verifyOpenIdAccessToken(token, config),
+  storeOpenIDSession: (...args) =>
+    require('~/server/services/AuthService').storeOpenIDSession(...args),
+});
 
 const hasPassportStrategy = (strategy) =>
   typeof passport._strategy === 'function' && passport._strategy(strategy) != null;
@@ -193,16 +208,18 @@ const requireJwtAuth = (req, res, next) => {
           return next(tenantErr);
         }
         // MongoDB-elimination WU-2b: propagate the user's OIDC console
-        // access token (if the console login flow set one — see
-        // `AuthService.js`'s `req.session.openidTokens`) into the
-        // dedicated AsyncLocalStorage the `~/models` conversation/message
-        // chokepoint reads from (`AuditTraceConversations/index.js
-        // ::wrapModelMethods`). Absent for requests with no OIDC console
-        // session (e.g. OpenCode's device-flow-only clients) — those calls
-        // correctly fall through to Mongo/the default, unaffected.
+        // access token into the dedicated AsyncLocalStorage the `~/models`
+        // conversation/message chokepoint reads from
+        // (`AuditTraceConversations/index.js::wrapModelMethods`). What travels
+        // is the request's token SOURCE, not a string: the console token lives
+        // 300 s and a turn can outlive it (CONSOLE-LONG-TURN-TOKEN-REFRESH), so
+        // every reader asks the source for a token that is fresh now. Absent
+        // for requests with no OIDC console session (e.g. OpenCode's
+        // device-flow-only clients) — those calls correctly fall through to
+        // Mongo/the default, unaffected.
         runWithRequestAccessToken(
           {
-            accessToken: req.session?.openidTokens?.accessToken,
+            source: getTokenSource(req),
             sub: req.user?.id,
           },
           () => refreshCloudFrontCookies(req, res, next),

@@ -4,20 +4,12 @@ const mockFindSession = jest.fn();
 const mockRunAsSystem = jest.fn((fn) => fn());
 
 jest.mock('jsonwebtoken', () => ({ verify: (...args) => mockVerify(...args) }));
-jest.mock('@librechat/api', () => ({ isEnabled: (v) => v === 'true' || v === true }), {
-  virtual: true,
-});
-jest.mock(
-  '@librechat/data-schemas',
-  () => ({
-    logger: { warn: jest.fn(), error: jest.fn() },
-    runAsSystem: (...args) => mockRunAsSystem(...args),
-  }),
-  { virtual: true },
-);
-jest.mock('librechat-data-provider', () => ({ SystemRoles: { USER: 'USER' } }), {
-  virtual: true,
-});
+jest.mock('@librechat/api', () => ({ isEnabled: (v) => v === 'true' || v === true }));
+jest.mock('@librechat/data-schemas', () => ({
+  logger: { warn: jest.fn(), error: jest.fn() },
+  runAsSystem: (...args) => mockRunAsSystem(...args),
+}));
+jest.mock('librechat-data-provider', () => ({ SystemRoles: { USER: 'USER' } }));
 jest.mock('~/models', () => ({
   getUserById: (...args) => mockGetUserById(...args),
   findSession: (...args) => mockFindSession(...args),
@@ -33,8 +25,16 @@ const run = async (req) => {
 
 describe('optionalShareFileAuth', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    /** `clearMocks` only clears calls: a `mockReturnValue` / `mockResolvedValue` set by one test would
+     *  otherwise leak into the next one under any other test order. Reset implementations, then re-arm
+     *  the one the middleware needs in every test. */
+    jest.resetAllMocks();
+    mockRunAsSystem.mockImplementation((fn) => fn());
     process.env.JWT_REFRESH_SECRET = 'test-secret';
+  });
+
+  afterEach(() => {
+    delete process.env.OPENID_REUSE_TOKENS;
   });
 
   it('short-circuits when a bearer user is already set (no cookie work)', async () => {

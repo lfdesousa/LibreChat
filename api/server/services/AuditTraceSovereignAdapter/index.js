@@ -275,8 +275,8 @@ class AuditTraceSovereignAdapter {
 
   // ── Identity / context (invariant 1 + 6 + 7) ───────────────────────────
 
-  /** @returns {string|undefined} the live request token via the ONE shared ALS. */
-  currentToken() {
+  /** @returns {Promise<string|undefined>} a fresh live request token via the ONE shared ALS. */
+  async currentToken() {
     return getRequestAccessToken();
   }
 
@@ -290,10 +290,10 @@ class AuditTraceSovereignAdapter {
    * a loud `MissingAccessTokenError` — NEVER a silent Mongo fallback.
    *
    * @param {string|null|undefined} token
-   * @returns {string}
+   * @returns {Promise<string>}
    */
-  requireToken(token) {
-    const resolved = token || this.currentToken();
+  async requireToken(token) {
+    const resolved = token || (await this.currentToken());
     if (!resolved) {
       throw new MissingAccessTokenError(
         `[AuditTraceSovereignAdapter:${this.domain}] no access token — sovereign call refused (fail-closed)`,
@@ -442,7 +442,7 @@ class AuditTraceSovereignAdapter {
    * @returns {Promise<Record<string, unknown>[]>}
    */
   async readByFilter(filter, ctx) {
-    const token = this.requireToken(ctx.token);
+    const token = await this.requireToken(ctx.token);
     const shape = classifyFilter(filter, this);
     if (shape.kind === 'unsafe') {
       logger.warn(
@@ -483,7 +483,7 @@ class AuditTraceSovereignAdapter {
    * @returns {Promise<Record<string, unknown>|null>}
    */
   async readOne(id, ctx) {
-    const token = this.requireToken(ctx.token);
+    const token = await this.requireToken(ctx.token);
     if (!isNonEmptyString(id)) {
       return null;
     }
@@ -506,7 +506,7 @@ class AuditTraceSovereignAdapter {
    * @returns {Promise<Record<string, unknown>>}
    */
   async create(id, data, ctx) {
-    const token = this.requireToken(ctx && ctx.token);
+    const token = await this.requireToken(ctx && ctx.token);
     if (!isNonEmptyString(id)) {
       throw new SovereignMemoryError(
         `[AuditTraceSovereignAdapter:${this.domain}] create requires a non-empty ${this.idField}`,
@@ -534,7 +534,7 @@ class AuditTraceSovereignAdapter {
    * @returns {Promise<Record<string, unknown>|null>}
    */
   async updateById(id, delta, ctx) {
-    const token = this.requireToken(ctx.token);
+    const token = await this.requireToken(ctx.token);
     if (!isNonEmptyString(id)) {
       return null;
     }
@@ -567,7 +567,7 @@ class AuditTraceSovereignAdapter {
    * @returns {Promise<Record<string, unknown>|null>}
    */
   async deleteById(id, ctx) {
-    const token = this.requireToken(ctx.token);
+    const token = await this.requireToken(ctx.token);
     if (!isNonEmptyString(id)) {
       return null;
     }
@@ -597,7 +597,7 @@ class AuditTraceSovereignAdapter {
    * @returns {Promise<{deletedCount: number}>}
    */
   async deleteByIds(ids, ctx) {
-    const token = this.requireToken(ctx.token);
+    const token = await this.requireToken(ctx.token);
     const clean = Array.isArray(ids) ? [...new Set(ids.filter(isNonEmptyString))] : [];
     if (clean.length === 0) {
       return { deletedCount: 0 };

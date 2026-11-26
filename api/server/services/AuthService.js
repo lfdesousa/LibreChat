@@ -1,3 +1,4 @@
+const cookies = require('cookie');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { createHash, webcrypto } = require('node:crypto');
@@ -6,6 +7,7 @@ const {
   getTenantId,
   DEFAULT_SESSION_EXPIRY,
   DEFAULT_REFRESH_TOKEN_EXPIRY,
+  runAsSystem,
 } = require('@librechat/data-schemas');
 const { ErrorTypes, SystemRoles, errorsToString } = require('librechat-data-provider');
 const {
@@ -188,6 +190,25 @@ const logoutUser = async (req, refreshToken) => {
       } catch (deleteErr) {
         logger.error('[logoutUser] Failed to delete session.', deleteErr);
         return { status: 500, message: 'Failed to delete session.' };
+      }
+    }
+
+    /**
+     * A mid-turn token rotation moves the session's refresh token on while the browser's cookie
+     * keeps naming the login one: its Session document must not outlive the logout either.
+     */
+    const cookieRefreshToken = req.headers?.cookie
+      ? cookies.parse(req.headers.cookie).refreshToken
+      : undefined;
+    if (cookieRefreshToken && cookieRefreshToken !== refreshToken) {
+      const cookieSession = await findSession({ userId: userId, refreshToken: cookieRefreshToken });
+      if (cookieSession) {
+        try {
+          await deleteSession({ sessionId: cookieSession._id });
+        } catch (deleteErr) {
+          logger.error('[logoutUser] Failed to delete the cookie-named session.', deleteErr);
+          return { status: 500, message: 'Failed to delete session.' };
+        }
       }
     }
 
@@ -795,12 +816,15 @@ const setOpenIDAuthTokens = (
 
     /** Store tokens server-side in session to avoid large cookies */
     if (req.session) {
+      /** `userId` binds the server-side session to the LibreChat user across refreshes (rotation-safe). */
+      const sessionUserId = userId ?? req.session.openidTokens?.userId;
       req.session.openidTokens = {
         accessToken: tokenset.access_token,
         idToken: logoutIdToken,
         refreshToken: refreshToken,
         expiresAt: expirationDate.getTime(),
         lastRefreshedAt: Date.now(),
+        ...(sessionUserId ? { userId: sessionUserId } : {}),
       };
     } else {
       logger.warn('[setOpenIDAuthTokens] No session available, falling back to cookies');
@@ -858,6 +882,27 @@ const storeOpenIDSession = async (userId, refreshToken, tenantId, previousRefres
     { userId, refreshToken, tenantId, previousRefreshToken },
     { upsertSession, deleteSession },
   );
+};
+
+/**
+ * Deletes the Session document of one OpenID refresh token, bound to the user (like the logout:
+ * a token that names ANOTHER user's document deletes nothing). System scope, like the store.
+ * @param {string} userId
+ * @param {string|undefined} refreshToken
+ * @returns {Promise<boolean>} false when there was nothing of this user's to delete
+ */
+const deleteOpenIDSessionDocument = async (userId, refreshToken) => {
+  if (!userId || !refreshToken) {
+    return false;
+  }
+  return runAsSystem(async () => {
+    const session = await findSession({ userId, refreshToken });
+    if (!session) {
+      return false;
+    }
+    await deleteSession({ sessionId: session._id });
+    return true;
+  });
 };
 
 /**
@@ -929,6 +974,7 @@ module.exports = {
   resetPassword,
   setOpenIDAuthTokens,
   storeOpenIDSession,
+  deleteOpenIDSessionDocument,
   setCloudFrontAuthCookies,
   requestPasswordReset,
   resendVerificationEmail,

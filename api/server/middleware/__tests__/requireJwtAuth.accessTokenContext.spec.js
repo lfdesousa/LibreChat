@@ -50,8 +50,8 @@ describe('requireJwtAuth — access-token context propagation (MongoDB-eliminati
     let observed;
 
     await new Promise((resolve) => {
-      requireJwtAuth(req, res, () => {
-        observed = { token: getRequestAccessToken(), sub: getRequestSub() };
+      requireJwtAuth(req, res, async () => {
+        observed = { token: await getRequestAccessToken(), sub: getRequestSub() };
         resolve();
       });
     });
@@ -65,8 +65,8 @@ describe('requireJwtAuth — access-token context propagation (MongoDB-eliminati
     let observed;
 
     await new Promise((resolve) => {
-      requireJwtAuth(req, res, () => {
-        observed = getRequestAccessToken();
+      requireJwtAuth(req, res, async () => {
+        observed = await getRequestAccessToken();
         resolve();
       });
     });
@@ -85,8 +85,8 @@ describe('requireJwtAuth — access-token context propagation (MongoDB-eliminati
     const withoutSession = { headers: {}, _mockUser: { id: 'user-4' } };
     let observed;
     await new Promise((resolve) => {
-      requireJwtAuth(withoutSession, mockRes(), () => {
-        observed = getRequestAccessToken();
+      requireJwtAuth(withoutSession, mockRes(), async () => {
+        observed = await getRequestAccessToken();
         resolve();
       });
     });
@@ -103,6 +103,6 @@ describe('requireJwtAuth — access-token context propagation (MongoDB-eliminati
 
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(401);
-    expect(getRequestAccessToken()).toBeUndefined();
+    await expect(getRequestAccessToken()).resolves.toBeUndefined();
   });
 });

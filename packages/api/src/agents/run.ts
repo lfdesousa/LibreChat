@@ -50,6 +50,7 @@ import type { ResolvedToolApprovalHook } from '~/agents/hitl/hooks';
 import type { ResolvedAlwaysApplySkill } from '~/agents/skills';
 import type { MCPToolAlias } from '~/tools/classification';
 import type { SubagentUsageEvent } from '~/agents/usage';
+import type { AccessTokenSource } from '~/utils/headers';
 import type * as t from '~/types';
 import {
   CHECK_BACKGROUND_TASK_NAME,
@@ -1376,6 +1377,7 @@ export async function createRun({
   discoveredToolNames,
   requestBody,
   user,
+  tokenSource,
   tenantId,
   centralTraceExportEnabled,
   tokenCounter,
@@ -1410,6 +1412,8 @@ export async function createRun({
   streamUsage?: boolean;
   requestBody?: t.RequestBody;
   user?: IUser;
+  /** The request's token source: headers that carry an OpenID access-token placeholder are re-resolved per outbound LLM request. */
+  tokenSource?: AccessTokenSource;
   tenantId?: string;
   /**
    * Defaults to true. Set false to suppress central Langfuse export for this
@@ -1608,6 +1612,7 @@ export async function createRun({
       llmConfig,
       user: createSafeUser(user),
       body: requestBody,
+      tokenSource,
     });
 
     /** Resolves issues with new OpenAI usage field */

@@ -427,7 +427,7 @@ class AuditTraceFilesAdapter extends AuditTraceSovereignAdapter {
                 fallback: (missing) => ctx.mongoFn(missing, undefined),
               });
             }
-            const token = this.requireToken(ctx.token);
+            const token = await this.requireToken(ctx.token);
             const sub = this.currentSub();
             let sovereignCount = 0;
             if (sub != null && String(user) !== String(sub)) {

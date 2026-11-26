@@ -340,7 +340,7 @@ class AuditTraceToolFavoritesAdapter extends AuditTraceSovereignAdapter {
             if (!isValidItemType(src.itemType) || !isId(src.itemId)) {
               return this.deferToMongo(ctx, [src]);
             }
-            const token = this.requireToken(ctx.token);
+            const token = await this.requireToken(ctx.token);
             // `listOwn` returns RAW api rows (snake_case `item_type`/
             // `item_id`) — it does NOT run them through `toDomain`/
             // `fromApi` (only `readByFilter`'s own-list branch does that,
@@ -380,7 +380,7 @@ class AuditTraceToolFavoritesAdapter extends AuditTraceSovereignAdapter {
             if (!isValidItemType(src.itemType) || !isId(src.itemId)) {
               return this.deferToMongo(ctx, [src]);
             }
-            const token = this.requireToken(ctx.token);
+            const token = await this.requireToken(ctx.token);
             let sovereignRemoved = false;
             try {
               await this.callProxy({

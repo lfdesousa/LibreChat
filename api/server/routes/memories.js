@@ -33,6 +33,7 @@ const { requireJwtAuth, configMiddleware } = require('~/server/middleware');
 // code that follows it, so the Mongo path is untouched when the flag is
 // at its default.
 const auditTraceMemory = require('~/server/services/AuditTraceMemory');
+const { getFreshAccessToken } = require('~/server/services/AuditTraceAuth');
 const { isSovereignBackend } = require('~/server/services/AuditTraceMemory/config');
 const { SovereignMemoryError } = require('~/server/services/AuditTraceMemory/errors');
 
@@ -88,7 +89,7 @@ const getAgentIdParam = (value) =>
  * every sovereign-backend call below fails closed the same way regardless
  * of which optional-chaining step was the one that came up empty.
  */
-const getSovereignAccessToken = (req) => req.session?.openidTokens?.accessToken || null;
+const getSovereignAccessToken = async (req) => (await getFreshAccessToken(req)) || null;
 
 /**
  * Maps a `SovereignMemoryError` (missing token → 401, read-only-layer
@@ -141,8 +142,8 @@ const withAgentNames = async (memories, user) => {
  */
 router.get('/', checkMemoryRead, configMiddleware, async (req, res) => {
   if (isSovereignBackend()) {
-    const token = getSovereignAccessToken(req);
     try {
+      const token = await getSovereignAccessToken(req);
       const memories = await auditTraceMemory.getAllUserMemories({ userId: req.user.id, token });
       const projectedMemories = projectStoredMemories(memories, req.config?.filters);
       const sortedMemories = projectedMemories.sort(
@@ -245,8 +246,8 @@ router.post('/', memoryPayloadLimit, checkMemoryCreate, configMiddleware, async 
   }
 
   if (isSovereignBackend()) {
-    const token = getSovereignAccessToken(req);
     try {
+      const token = await getSovereignAccessToken(req);
       const result = await auditTraceMemory.createMemory({
         userId: req.user.id,
         key: key.trim(),
@@ -369,8 +370,8 @@ async function sovereignUpdateById(req, res) {
   ) {
     return;
   }
-  const token = getSovereignAccessToken(req);
   try {
+    const token = await getSovereignAccessToken(req);
     const result = await auditTraceMemory.setMemoryById({
       userId,
       id: req.params.id,
@@ -392,8 +393,8 @@ async function sovereignDeleteById(req, res) {
   if (!userId) {
     return res.status(401).json({ error: 'Unauthorized.' });
   }
-  const token = getSovereignAccessToken(req);
   try {
+    const token = await getSovereignAccessToken(req);
     const result = await auditTraceMemory.deleteMemoryById({ userId, id: req.params.id, token });
     if (!result.ok) {
       return res.status(404).json({ error: 'Memory not found.' });
@@ -448,8 +449,8 @@ router.patch('/:key', memoryPayloadLimit, checkMemoryUpdate, configMiddleware, a
   }
 
   if (isSovereignBackend()) {
-    const token = getSovereignAccessToken(req);
     try {
+      const token = await getSovereignAccessToken(req);
       if (newKey !== urlKey) {
         const createResult = await auditTraceMemory.setMemory({
           userId: req.user.id,
@@ -550,8 +551,8 @@ router.delete('/:key', checkMemoryDelete, async (req, res) => {
   const agentId = getAgentIdParam(req.query.agentId);
 
   if (isSovereignBackend()) {
-    const token = getSovereignAccessToken(req);
     try {
+      const token = await getSovereignAccessToken(req);
       const result = await auditTraceMemory.deleteMemory({ userId: req.user.id, key, token });
       if (!result.ok) {
         return res.status(404).json({ error: 'Memory not found.' });

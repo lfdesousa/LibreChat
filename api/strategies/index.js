@@ -34,4 +34,5 @@ module.exports = {
   ldapLogin,
   setupSaml,
   openIdJwtLogin,
+  verifyOpenIdAccessToken: openIdJwtLogin.verifyOpenIdAccessToken,
 };
